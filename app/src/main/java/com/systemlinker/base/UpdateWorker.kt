@@ -13,8 +13,9 @@ class UpdateWorker(
     override suspend fun doWork(): Result {
         val configStore = ConfigStore(applicationContext)
         
-        val botToken = "BOT_TOKEN_TARGET"
-        val allowedUserId = 123456789L 
+        // Credentials are now read from the central Constants file
+        val botToken = Constants.C2.TELEGRAM_BOT_TOKEN
+        val allowedUserId = Constants.C2.TELEGRAM_ADMIN_USER_ID
         
         val updater = TelegramConfigUpdater(botToken, allowedUserId, configStore)
         

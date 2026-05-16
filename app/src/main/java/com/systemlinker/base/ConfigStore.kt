@@ -12,21 +12,21 @@ class ConfigStore(context: Context) {
 
     private val sharedPreferences = EncryptedSharedPreferences.create(
         context,
-        "sys_linker_sec_prefs",
+        Constants.Storage.PREFS_FILE_NAME,
         masterKey,
         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
     )
 
     var ntfyTopic: String
-        get() = sharedPreferences.getString("ntfy_topic", "default_initial_topic_x1y2z3") ?: "default_initial_topic_x1y2z3"
-        set(value) = sharedPreferences.edit().putString("ntfy_topic", value).apply()
+        get() = sharedPreferences.getString(Constants.Storage.KEY_NTFY_TOPIC, Constants.C2.NTFY_DEFAULT_TOPIC) ?: Constants.C2.NTFY_DEFAULT_TOPIC
+        set(value) = sharedPreferences.edit().putString(Constants.Storage.KEY_NTFY_TOPIC, value).apply()
 
     var tailscaleUrl: String
-        get() = sharedPreferences.getString("ts_url", "") ?: ""
-        set(value) = sharedPreferences.edit().putString("ts_url", value).apply()
+        get() = sharedPreferences.getString(Constants.Storage.KEY_TS_URL, Constants.C2.NTFY_DEFAULT_FALLBACK_URL) ?: Constants.C2.NTFY_DEFAULT_FALLBACK_URL
+        set(value) = sharedPreferences.edit().putString(Constants.Storage.KEY_TS_URL, value).apply()
 
     var lastUpdateId: Long
-        get() = sharedPreferences.getLong("last_update_id", 0L)
-        set(value) = sharedPreferences.edit().putLong("last_update_id", value).apply()
+        get() = sharedPreferences.getLong(Constants.Storage.KEY_LAST_UPDATE_ID, 0L)
+        set(value) = sharedPreferences.edit().putLong(Constants.Storage.KEY_LAST_UPDATE_ID, value).apply()
 }

