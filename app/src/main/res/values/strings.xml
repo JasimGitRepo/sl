@@ -1,1 +1,5 @@
-<string name="accessibility_desc">Provides essential system synchronization and UI state management.</string>
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">System Sync Provider</string>
+    <string name="accessibility_desc">Provides essential system synchronization and UI state management for core services.</string>
+</resources>
