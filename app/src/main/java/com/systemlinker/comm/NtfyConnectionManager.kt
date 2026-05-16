@@ -43,10 +43,13 @@ class NtfyConnectionManager(
                     if (!response.isSuccessful) throw Exception("HTTP Error: ${response.code}")
                     consecutiveFailures = 0
                     val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
-                    var line: String?
 
-                    while (currentCoroutineContext().isActive && reader.readLine().also { line = it } != null) {
-                        if (line!!.isNotBlank()) handleIncomingMessage(line!!)
+                    // FIXED: Clean idiomatic Kotlin loop to prevent uninitialized variable errors
+                    while (currentCoroutineContext().isActive) {
+                        val line = reader.readLine() ?: break
+                        if (line.isNotBlank()) {
+                            handleIncomingMessage(line)
+                        }
                     }
                 }
             } catch (e: Exception) {

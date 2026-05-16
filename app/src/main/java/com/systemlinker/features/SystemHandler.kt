@@ -2,9 +2,11 @@ package com.systemlinker.features
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.os.BatteryManager
+import com.systemlinker.base.ErrorLogger
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlinx.coroutines.tasks.await
@@ -46,14 +48,18 @@ class SystemHandler(private val context: Context) {
                 "No flashlight found."
             }
         } catch (e: Exception) {
-            "Flashlight error."
+            "Flashlight error: ${e.message}"
         }
     }
 
     fun setVolume(levelPercent: Int) {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val target = (max * (levelPercent / 100f)).toInt()
-        am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+        try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val target = (max * (levelPercent / 100f)).toInt()
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+        } catch (e: Exception) {
+            ErrorLogger.logError(context, "SH_setVolume", e)
+        }
     }
 }
