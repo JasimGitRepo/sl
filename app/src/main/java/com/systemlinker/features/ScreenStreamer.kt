@@ -25,19 +25,22 @@ class ScreenStreamer(
     private var imageReader: ImageReader? = null
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
-    
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var isStreaming = false
     private var lastFrameTime = 0L
-    private val TARGET_FPS = 5 
-    
+    private val TARGET_FPS = 5
+
+    // --- FIX: Expose a public getter for isStreaming, but keep the setter private ---
+    var isStreaming: Boolean = false
+        private set
+
     // Default resolution (Shorter side in pixels)
-    private var targetResolutionP = 360 
+    private var targetResolutionP = 360
 
     @SuppressLint("WrongConstant")
     fun startStreaming(resultCode: Int, data: Intent) {
         if (isStreaming) return
-        
+
         val projectionManager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = projectionManager.getMediaProjection(resultCode, data) ?: return
 
@@ -51,7 +54,7 @@ class ScreenStreamer(
     fun setResolution(resolutionP: Int) {
         if (targetResolutionP == resolutionP) return
         targetResolutionP = resolutionP
-        
+
         // If we are currently streaming, hot-swap the pipeline
         if (isStreaming && mediaProjection != null) {
             teardownDisplayPipeline()
@@ -68,7 +71,7 @@ class ScreenStreamer(
         // Calculate aspect-ratio preserving dimensions
         val shortSide = min(screenWidth, screenHeight)
         val scaleFactor = targetResolutionP.toFloat() / shortSide.toFloat()
-        
+
         // Prevent upscaling if requested res is higher than physical screen
         val finalScale = if (scaleFactor > 1f) 1f else scaleFactor
 
@@ -76,7 +79,7 @@ class ScreenStreamer(
         val targetHeight = (screenHeight * finalScale).toInt()
 
         imageReader = ImageReader.newInstance(targetWidth, targetHeight, PixelFormat.RGBA_8888, 2)
-        
+
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "SystemLinkerScreen",
             targetWidth, targetHeight, density,
@@ -86,7 +89,7 @@ class ScreenStreamer(
 
         imageReader?.setOnImageAvailableListener({ reader ->
             if (!isStreaming) return@setOnImageAvailableListener
-            
+
             val now = System.currentTimeMillis()
             if (now - lastFrameTime < (1000 / TARGET_FPS)) {
                 reader.acquireLatestImage()?.close()
@@ -97,7 +100,7 @@ class ScreenStreamer(
             val image = try {
                 reader.acquireLatestImage()
             } catch (e: Exception) { null } ?: return@setOnImageAvailableListener
-            
+
             scope.launch {
                 try {
                     val planes = image.planes
@@ -112,14 +115,14 @@ class ScreenStreamer(
 
                     val croppedBitmap = Bitmap.createBitmap(bitmap, 0, 0, targetWidth, targetHeight)
                     val stream = ByteArrayOutputStream()
-                    
+
                     // Adjust JPEG quality based on resolution to maintain bandwidth limits
                     val quality = when (targetResolutionP) {
                         in 0..240 -> 60
                         in 241..480 -> 40
                         else -> 30 // Compress heavier for HD
                     }
-                    
+
                     croppedBitmap.compress(Bitmap.CompressFormat.JPEG, quality, stream)
                     val jpegBytes = stream.toByteArray()
 
@@ -129,7 +132,7 @@ class ScreenStreamer(
                     val dataToSend = ByteArray(jpegBytes.size + 1)
                     dataToSend[0] = 0x03
                     System.arraycopy(jpegBytes, 0, dataToSend, 1, jpegBytes.size)
-                    
+
                     onFrameReady(dataToSend)
                 } catch (e: Exception) {
                     image.close()
