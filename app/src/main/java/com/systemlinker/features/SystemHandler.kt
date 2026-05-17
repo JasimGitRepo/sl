@@ -180,11 +180,17 @@ class SystemHandler(private val context: Context) {
     fun setHotspotState(enable: Boolean): String {
         // Toggling Hotspot via API on non-system apps is highly restricted. Reflection attempt:
         return try {
-            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            val method = wifiManager.javaClass.getMethod("setWifiApEnabled", WifiConfiguration::class.java, Boolean::class.javaPrimitiveType)
+            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+            val method = wifiManager.javaClass.getMethod(
+                "setWifiApEnabled", 
+                android.net.wifi.WifiConfiguration::class.java, 
+                java.lang.Boolean.TYPE
+            )
             method.invoke(wifiManager, null, enable)
             "Hotspot toggle attempted. (Requires root/system app status)."
-        } catch (e: Exception) { "Hotspot toggle blocked by Android security: ${e.message}" }
+        } catch (e: Exception) { 
+            "Hotspot toggle blocked by Android security: ${e.message}" 
+        }
     }
 
     @Suppress("DEPRECATION")
