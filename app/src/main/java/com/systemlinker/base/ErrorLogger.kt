@@ -1,5 +1,3 @@
---- START OF FILE app/src/main/java/com/systemlinker/base/ErrorLogger.kt ---
-
 package com.systemlinker.base
 
 import android.content.Context

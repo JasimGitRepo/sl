@@ -17,7 +17,7 @@ class VaultManager(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
 
     companion object {
         private const val DATABASE_NAME = "sys_linker_vault.db"
-        private const val DATABASE_VERSION = 1
+        private const val DATABASE_VERSION = 2
 
         const val TABLE_WORKFLOWS = "workflows"
         const val TABLE_LOGS = "workflow_logs"
@@ -43,9 +43,6 @@ class VaultManager(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         onCreate(db)
     }
 
-    // =====================================
-    // CRYPTO ENGINE (AES-256-GCM)
-    // =====================================
     private fun initCrypto() {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         if (!keyStore.containsAlias(KEY_ALIAS)) {
@@ -87,14 +84,11 @@ class VaultManager(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         }
     }
 
-    // =====================================
-    // WORKFLOW CRUD
-    // =====================================
     fun saveWorkflow(name: String, type: String, triggerEvent: String, content: String) {
         val db = writableDatabase
         val values = ContentValues().apply {
             put("name", name)
-            put("type", type) // 'temp', 'semi_perma', 'full_perma'
+            put("type", type)
             put("trigger_event", triggerEvent)
             put("state", "active")
             put("content_encrypted", encrypt(content))
@@ -123,16 +117,7 @@ class VaultManager(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         cursor.close()
         return map
     }
-
-    fun getWorkflowsByTrigger(triggerEvent: String): List<String> {
-        val db = readableDatabase
-        val cursor = db.rawQuery("SELECT name FROM $TABLE_WORKFLOWS WHERE type = 'semi' AND state = 'active' AND trigger_event = ?", arrayOf(triggerEvent))
-        val list = mutableListOf<String>()
-        while (cursor.moveToNext()) list.add(cursor.getString(0))
-        cursor.close()
-        return list
-    }
-
+    
     fun getWorkflow(name: String): String? {
         val db = readableDatabase
         val cursor = db.rawQuery("SELECT content_encrypted FROM $TABLE_WORKFLOWS WHERE name = ?", arrayOf(name))
@@ -150,16 +135,13 @@ class VaultManager(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
 
     fun getWorkflowsByTrigger(triggerEvent: String): List<String> {
         val db = readableDatabase
-        val cursor = db.rawQuery("SELECT name FROM $TABLE_WORKFLOWS WHERE type = 'semi_perma' AND trigger_event = ?", arrayOf(triggerEvent))
+        val cursor = db.rawQuery("SELECT name FROM $TABLE_WORKFLOWS WHERE type = 'semi' AND state = 'active' AND trigger_event = ?", arrayOf(triggerEvent))
         val list = mutableListOf<String>()
         while (cursor.moveToNext()) list.add(cursor.getString(0))
         cursor.close()
         return list
     }
 
-    // =====================================
-    // LOG & ERROR CRUD
-    // =====================================
     fun appendLog(workflowName: String, logText: String) {
         val db = writableDatabase
         val values = ContentValues().apply {
