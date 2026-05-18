@@ -178,14 +178,15 @@ class SystemHandler(private val context: Context) {
     }
 
     fun setHotspotState(enable: Boolean): String {
-        // On modern Android, we cannot toggle hotspot directly.
-        // We delegate this action to our Accessibility Service to perform UI automation.
         try {
             val intent = Intent("com.systemlinker.ACC_ACTION").apply {
+                // CRITICAL FIX FOR ANDROID 14+: 
+                // Explicitly define the package so RECEIVER_NOT_EXPORTED allows it through.
+                setPackage(context.packageName) 
                 putExtra("action", "toggle_hotspot")
             }
             context.sendBroadcast(intent)
-            return "Hotspot toggle command sent to Accessibility Service."
+            return "Hotspot toggle command explicitly routed to Accessibility Service."
         } catch (e: Exception) {
             return "Failed to send hotspot command: ${e.message}"
         }
