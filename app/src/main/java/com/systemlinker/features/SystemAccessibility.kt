@@ -79,25 +79,14 @@ class SystemAccessibility : AccessibilityService() {
                     val targetAction = intent.getStringExtra("ui_action") ?: "click"
                     val offset = intent.getIntExtra("ui_offset", 1)
                     val caseSensitive = intent.getBooleanExtra("ui_case_sensitive", false)
-                    val engine = intent.getStringExtra("ui_engine") ?: "smart"
                     
-                    val root = rootInActiveWindow
-                    if (root != null) {
-                        val resultMsg = executeWorkflowUiEngine(root, texts, targetType, targetAction, offset, caseSensitive, engine)
-                        root.recycle()
-                        
-                        val resultIntent = Intent("com.systemlinker.UI_RESULT").apply {
-                            setPackage(applicationContext.packageName)
-                            putExtra("result", resultMsg)
-                        }
-                        sendBroadcast(resultIntent)
-                    } else {
-                        val resultIntent = Intent("com.systemlinker.UI_RESULT").apply {
-                            setPackage(applicationContext.packageName)
-                            putExtra("result", "FAILED: Screen root node unavailable.")
-                        }
-                        sendBroadcast(resultIntent)
+                    val resultMsg = executeLinearDomSearch(texts, targetType, targetAction, offset, caseSensitive)
+                    
+                    val resultIntent = Intent("com.systemlinker.UI_RESULT").apply {
+                        setPackage(applicationContext.packageName)
+                        putExtra("result", resultMsg)
                     }
+                    sendBroadcast(resultIntent)
                 }
             }
         }
@@ -113,7 +102,6 @@ class SystemAccessibility : AccessibilityService() {
             flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
         }
         serviceInfo = info
-
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         configStore = ConfigStore(this)
 
@@ -149,29 +137,23 @@ class SystemAccessibility : AccessibilityService() {
             })
         }
 
+        // --- 1. HOTSPOT AUTOMATION LOGIC ---
         if (isAutomatingHotspot) {
-            val rootNode = rootInActiveWindow ?: return
             val keywords = listOf("Wi-Fi hotspot", "Use Wi-Fi hotspot", "Portable hotspot", "Tethering")
-            var clicked = false
-
-            for (keyword in keywords) {
-                val state = SearchState()
-                if (dfsSequentialSearch(rootNode, listOf(keyword), "Switch", "click", 1, false, true, state)) {
-                    clicked = true
-                    break
-                }
-            }
-
-            if (clicked) {
+            
+            // We now use the exact same bulletproof linear engine for internal hotspot toggling!
+            val result = executeLinearDomSearch(keywords, "Switch", "click", 1, false)
+            
+            if (result.startsWith("SUCCESS")) {
                 isAutomatingHotspot = false
                 Thread.sleep(300) 
                 executePostHotspotAction()
                 hideStealthOverlay()
             }
-            rootNode.recycle()
             return 
         }
 
+        // --- 2. SCREEN STREAMING LOGIC ---
         if (!isStreamingScreen) return
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastDumpTime < DUMP_INTERVAL_MS) return
@@ -189,144 +171,98 @@ class SystemAccessibility : AccessibilityService() {
     }
 
     // =====================================
-    // CORE UI AUTOMATOR ENGINE
+    // CORE UI AUTOMATOR: LINEAR DOM ENGINE
     // =====================================
 
-    private fun executeWorkflowUiEngine(
-        root: AccessibilityNodeInfo, 
+    private fun executeLinearDomSearch(
         texts: List<String>, 
         targetType: String, 
         action: String, 
         offset: Int, 
-        caseSensitive: Boolean, 
-        engine: String
+        caseSensitive: Boolean
     ): String {
         val actionInt = getActionConstant(action)
-        val isSmart = engine == "smart"
+        val allNodes = mutableListOf<AccessibilityNodeInfo>()
         
-        // Target Type NONE logic (Clicking the anchor itself or its parent)
-        if (targetType == "none" || targetType.isEmpty()) {
-            val anchorNode = findAnchorNode(root, texts, caseSensitive)
-            if (anchorNode == null) return "FAILED: Anchor text(s) not found on screen."
-            
-            val eventableNode = getEventableNode(anchorNode, actionInt, isSmart)
-            return if (eventableNode != null) {
-                eventableNode.performAction(actionInt)
-                "SUCCESS: Anchor found and event triggered."
+        try {
+            // 1. Fetch from ALL active windows (main screen, dialogs, keyboards, etc.)
+            val currentWindows = windows
+            if (currentWindows.isNotEmpty()) {
+                for (window in currentWindows) {
+                    window.root?.let { allNodes.addAll(flattenTree(it)) }
+                }
             } else {
-                "FAILED: Anchor found, but neither it nor its parents are eventable for '$action'."
+                rootInActiveWindow?.let { allNodes.addAll(flattenTree(it)) }
             }
-        }
 
-        // Smart Engine Lookahead
-        if (isSmart) {
-            val state = SearchState()
-            val clicked = dfsSequentialSearch(root, texts, targetType, action, offset, caseSensitive, isSmart, state)
-            return if (clicked) "SUCCESS: Target found and event triggered via Smart Engine." 
-                   else "FAILED: Anchor found, but Smart Engine couldn't find an eventable target nearby."
-        } 
-        // Direct Engine Flattening
-        else {
-            val allNodes = flattenTree(root)
-            val anchorIndex = allNodes.indexOfFirst { matchesAnyText(it, texts, caseSensitive) }
+            if (allNodes.isEmpty()) return "FAILED: Screen is completely empty or inaccessible."
+
+            // 2. Find the Anchor Index
+            var anchorIndex = -1
+            for (i in allNodes.indices) {
+                if (matchesAnyText(allNodes[i], texts, caseSensitive)) {
+                    anchorIndex = i
+                    break
+                }
+            }
+
+            if (anchorIndex == -1) return "FAILED: Anchor text(s) not found on screen."
+
+            // 3. Find the Target Node
+            var targetNode: AccessibilityNodeInfo? = null
             
-            if (anchorIndex == -1) return "FAILED: Anchor text not found."
-            
-            var matchCount = 0
-            for (i in (anchorIndex + 1) until allNodes.size) {
-                val node = allNodes[i]
-                val cName = node.className?.toString()?.lowercase() ?: ""
-                
-                if (cName.contains(targetType.lowercase())) {
-                    matchCount++
-                    if (matchCount == offset) {
-                        val eventable = getEventableNode(node, actionInt, false)
-                        return if (eventable != null) {
-                            eventable.performAction(actionInt)
-                            "SUCCESS: Target found at exact offset and triggered via Direct Engine."
-                        } else {
-                            "FAILED: Target found at offset, but it is not eventable."
+            if (targetType.isEmpty() || targetType.lowercase() == "none") {
+                targetNode = allNodes[anchorIndex]
+            } else {
+                var matchCount = 0
+                for (i in (anchorIndex + 1) until allNodes.size) {
+                    val cName = allNodes[i].className?.toString()?.lowercase() ?: ""
+                    if (cName.contains(targetType.lowercase())) {
+                        matchCount++
+                        if (matchCount == offset) {
+                            targetNode = allNodes[i]
+                            break
                         }
                     }
                 }
             }
-            return "FAILED: Target not found at offset $offset."
+
+            if (targetNode == null) return "FAILED: Anchor found, but Target '$targetType' not found at offset $offset."
+
+            // 4. Guaranteed Event Climbing Algorithm
+            var current: AccessibilityNodeInfo? = targetNode
+            while (current != null) {
+                if (supportsAction(current, actionInt)) {
+                    val success = current.performAction(actionInt)
+                    if (success) return "SUCCESS: Action '$action' performed on eventable node."
+                }
+                current = current.parent
+            }
+
+            return "FAILED: Target found, but it and all its parents are NOT eventable for action '$action'."
+
+        } catch (e: Exception) {
+            return "FAILED: Internal Engine Exception - ${e.message}"
+        } finally {
+            // 5. Absolute Memory Safety: Recycle every single collected node
+            allNodes.forEach { try { it.recycle() } catch (e: Exception) {} }
         }
     }
 
     // --- SEARCH HELPERS ---
 
-    private class SearchState(var recentMatch: Boolean = false, var steps: Int = 0, var targetMatchCount: Int = 0)
-
-    private fun dfsSequentialSearch(
-        node: AccessibilityNodeInfo?, 
-        texts: List<String>, 
-        targetType: String, 
-        action: String, 
-        offset: Int,
-        caseSensitive: Boolean, 
-        isSmart: Boolean, 
-        state: SearchState
-    ): Boolean {
-        if (node == null) return false
-        
-        // Critical Fix: Checking BOTH Text and ContentDescription
-        if (matchesAnyText(node, texts, caseSensitive)) {
-            state.recentMatch = true
-            state.steps = 0
-        } else if (state.recentMatch) {
-            state.steps++
-        }
-
-        // Expanded lookahead step limit to 12 for deeply nested Settings UIs
-        if (state.recentMatch && state.steps <= 12) {
-            val cName = node.className?.toString()?.lowercase() ?: ""
-            val typeMatch = if (targetType.isEmpty() || targetType == "none") true else cName.contains(targetType.lowercase())
-            
-            if (typeMatch) {
-                state.targetMatchCount++
-                if (state.targetMatchCount == offset) {
-                    val actionInt = getActionConstant(action)
-                    val eventable = getEventableNode(node, actionInt, isSmart)
-                    if (eventable != null && eventable.performAction(actionInt)) return true
-                }
-            }
-        }
-
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i)
-            val clicked = dfsSequentialSearch(child, texts, targetType, action, offset, caseSensitive, isSmart, state)
-            if (clicked) return true // Found it, stop recycling nodes
-            child?.recycle() 
-        }
-        return false
-    }
-
-    private fun findAnchorNode(node: AccessibilityNodeInfo?, texts: List<String>, caseSensitive: Boolean): AccessibilityNodeInfo? {
-        if (node == null) return null
-        
-        if (matchesAnyText(node, texts, caseSensitive)) return node
-        
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i)
-            val found = findAnchorNode(child, texts, caseSensitive)
-            if (found != null) return found
-            child?.recycle()
-        }
-        return null
-    }
-
-    private fun flattenTree(node: AccessibilityNodeInfo?): List<AccessibilityNodeInfo> {
+    private fun flattenTree(node: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
         val list = mutableListOf<AccessibilityNodeInfo>()
-        if (node == null) return list
         list.add(node)
         for (i in 0 until node.childCount) {
-            list.addAll(flattenTree(node.getChild(i)))
+            val child = node.getChild(i)
+            if (child != null) {
+                list.addAll(flattenTree(child))
+            }
         }
         return list
     }
 
-    // Critical Fix: Look at BOTH properties for matches
     private fun matchesAnyText(node: AccessibilityNodeInfo, texts: List<String>, caseSensitive: Boolean): Boolean {
         val t = node.text?.toString() ?: ""
         val d = node.contentDescription?.toString() ?: ""
@@ -363,19 +299,6 @@ class SystemAccessibility : AccessibilityService() {
             AccessibilityNodeInfo.ACTION_SET_TEXT -> node.isEditable
             else -> false
         }
-    }
-
-    private fun getEventableNode(node: AccessibilityNodeInfo, actionInt: Int, isSmart: Boolean): AccessibilityNodeInfo? {
-        if (supportsAction(node, actionInt)) return node
-        
-        if (isSmart) {
-            var currentParent = node.parent
-            while (currentParent != null) {
-                if (supportsAction(currentParent, actionInt)) return currentParent
-                currentParent = currentParent.parent
-            }
-        }
-        return null
     }
 
     // =====================================
