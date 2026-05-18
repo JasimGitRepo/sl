@@ -6,10 +6,15 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Color
+import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
+import android.view.View
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.FrameLayout
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -20,6 +25,11 @@ class SystemAccessibility : AccessibilityService() {
     private val DUMP_INTERVAL_MS = 500L
 
     private var isAutomatingHotspot = false
+    
+    // Stealth Overlay Variables
+    private var windowManager: WindowManager? = null
+    private var stealthOverlayView: View? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private val commandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -32,14 +42,19 @@ class SystemAccessibility : AccessibilityService() {
                 "toggle_hotspot" -> {
                     isAutomatingHotspot = true
                     
-                    // FAILSAFE: Force close settings after 3 seconds if it fails to find the switch
-                    Handler(Looper.getMainLooper()).postDelayed({
+                    // 1. Immediately cast the pitch-black stealth overlay
+                    showStealthOverlay()
+                    
+                    // 2. FAILSAFE: Force close settings AND remove overlay after 3 seconds
+                    mainHandler.postDelayed({
                         if (isAutomatingHotspot) {
                             isAutomatingHotspot = false
                             performGlobalAction(GLOBAL_ACTION_BACK)
+                            hideStealthOverlay()
                         }
                     }, 3000)
                     
+                    // 3. Launch the settings app under the black screen
                     try {
                         val settingsIntent = Intent().apply {
                             setClassName("com.android.settings", "com.android.settings.TetherSettings")
@@ -66,6 +81,8 @@ class SystemAccessibility : AccessibilityService() {
         }
         serviceInfo = info
 
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
         val filter = IntentFilter("com.systemlinker.ACC_ACTION")
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(commandReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -74,12 +91,52 @@ class SystemAccessibility : AccessibilityService() {
         }
     }
 
+    // =====================================
+    // STEALTH OVERLAY GENERATOR
+    // =====================================
+    private fun showStealthOverlay() {
+        mainHandler.post {
+            if (stealthOverlayView != null) return@post
+            
+            val layout = FrameLayout(this)
+            // A pitch black screen looks like the display briefly slept or lagged
+            layout.setBackgroundColor(Color.BLACK) 
+            
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, // Magic bypass for Draw Over Apps
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or       // Lets underlying app keep window focus
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or       // Passes physical touches down
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or 
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,      // Covers status bar and nav bar
+                PixelFormat.TRANSLUCENT
+            )
+            
+            try {
+                windowManager?.addView(layout, params)
+                stealthOverlayView = layout
+            } catch (e: Exception) { }
+        }
+    }
+
+    private fun hideStealthOverlay() {
+        mainHandler.post {
+            stealthOverlayView?.let { 
+                try {
+                    windowManager?.removeView(it)
+                } catch (e: Exception) { }
+            }
+            stealthOverlayView = null
+        }
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // --- 1. HOTSPOT AUTOMATION LOGIC ---
         if (isAutomatingHotspot) {
             val rootNode = rootInActiveWindow ?: return
             
-            val keywords = listOf("Wi-Fi hotspot", "Use Wi-Fi hotspot", "Portable hotspot", "Tethering", "Hotspot", "Mobile Hotspot")
+            val keywords = listOf("Wi-Fi hotspot", "Use Wi-Fi hotspot", "Portable hotspot", "Tethering")
             var clicked = false
 
             for (keyword in keywords) {
@@ -93,6 +150,9 @@ class SystemAccessibility : AccessibilityService() {
                 isAutomatingHotspot = false
                 Thread.sleep(300) // Let the UI register the toggle
                 performGlobalAction(GLOBAL_ACTION_BACK)
+                
+                // Automation finished, lift the black screen!
+                hideStealthOverlay()
             }
             
             rootNode.recycle()
@@ -122,11 +182,7 @@ class SystemAccessibility : AccessibilityService() {
         sendBroadcast(broadcast)
     }
 
-    /**
-     * Master Search Function: Chains multiple strategies to guarantee a click.
-     */
     private fun findAndClickSwitchForText(rootNode: AccessibilityNodeInfo, text: String): Boolean {
-        
         // Strategy 1: Tree Climbing (Structural Search)
         val nodes = rootNode.findAccessibilityNodeInfosByText(text)
         if (!nodes.isNullOrEmpty()) {
@@ -144,7 +200,6 @@ class SystemAccessibility : AccessibilityService() {
                     depth++
                 }
                 
-                // Fallback 1: Just click whatever is clickable around the text
                 val clickable = findClickableParent(node)
                 if (clickable != null && clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
             }
@@ -159,20 +214,13 @@ class SystemAccessibility : AccessibilityService() {
         return false
     }
 
-    // State tracker for the sequential search
     private class SearchState(var recentMatch: Boolean = false, var steps: Int = 0)
 
-    /**
-     * Sequential DFS algorithm: 
-     * Scans UI top-to-bottom. If it sees the keyword, it keeps its eyes open for the next 
-     * 6 elements. If any of those are a Switch/Toggle, it clicks it immediately.
-     */
     private fun dfsSequentialSearch(node: AccessibilityNodeInfo?, targetText: String, state: SearchState): Boolean {
         if (node == null) return false
 
         val nodeText = node.text?.toString() ?: ""
         
-        // Did we hit the keyword?
         if (nodeText.contains(targetText, ignoreCase = true)) {
             state.recentMatch = true
             state.steps = 0
@@ -180,24 +228,19 @@ class SystemAccessibility : AccessibilityService() {
             state.steps++
         }
 
-        // If we recently saw the keyword, actively look for a switch in the next few elements
         if (state.recentMatch && state.steps <= 6) {
             val cName = node.className?.toString() ?: ""
             if (cName.contains("Switch") || node.isCheckable) {
-                // Found a toggle right after the text! Click it.
                 if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-                
-                // Try clicking its direct parent if the switch itself isn't technically clickable
                 val p = node.parent
                 if (p != null && p.isClickable && p.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
             }
         }
 
-        // Continue scanning children sequentially
         for (i in 0 until node.childCount) {
             val child = node.getChild(i)
             val clicked = dfsSequentialSearch(child, targetText, state)
-            child?.recycle() // Free memory
+            child?.recycle() 
             if (clicked) return true
         }
         return false
@@ -206,7 +249,6 @@ class SystemAccessibility : AccessibilityService() {
     private fun searchForSwitchInTree(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
         if (node == null) return null
         val className = node.className?.toString() ?: ""
-        
         if (className.contains("Switch") || node.isCheckable) return node
         
         for (i in 0 until node.childCount) {
@@ -246,10 +288,13 @@ class SystemAccessibility : AccessibilityService() {
         return obj
     }
 
-    override fun onInterrupt() {}
+    override fun onInterrupt() {
+        hideStealthOverlay()
+    }
 
     override fun onDestroy() {
         super.onDestroy()
+        hideStealthOverlay()
         unregisterReceiver(commandReceiver)
     }
 }
