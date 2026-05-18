@@ -49,7 +49,6 @@ class SystemAccessibility : AccessibilityService() {
                 "toggle_hotspot" -> {
                     isAutomatingHotspot = true
                     showStealthOverlay()
-                    
                     val duration = configStore.overlayDurationMs
                     mainHandler.postDelayed({
                         if (isAutomatingHotspot) {
@@ -58,7 +57,6 @@ class SystemAccessibility : AccessibilityService() {
                             hideStealthOverlay()
                         }
                     }, duration)
-                    
                     try {
                         val settingsIntent = Intent().apply {
                             setClassName("com.android.settings", "com.android.settings.TetherSettings")
@@ -137,13 +135,9 @@ class SystemAccessibility : AccessibilityService() {
             })
         }
 
-        // --- 1. HOTSPOT AUTOMATION LOGIC ---
         if (isAutomatingHotspot) {
             val keywords = listOf("Wi-Fi hotspot", "Use Wi-Fi hotspot", "Portable hotspot", "Tethering")
-            
-            // We now use the exact same bulletproof linear engine for internal hotspot toggling!
             val result = executeLinearDomSearch(keywords, "Switch", "click", 1, false)
-            
             if (result.startsWith("SUCCESS")) {
                 isAutomatingHotspot = false
                 Thread.sleep(300) 
@@ -153,7 +147,6 @@ class SystemAccessibility : AccessibilityService() {
             return 
         }
 
-        // --- 2. SCREEN STREAMING LOGIC ---
         if (!isStreamingScreen) return
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastDumpTime < DUMP_INTERVAL_MS) return
@@ -185,7 +178,6 @@ class SystemAccessibility : AccessibilityService() {
         val allNodes = mutableListOf<AccessibilityNodeInfo>()
         
         try {
-            // 1. Fetch from ALL active windows (main screen, dialogs, keyboards, etc.)
             val currentWindows = windows
             if (currentWindows.isNotEmpty()) {
                 for (window in currentWindows) {
@@ -197,7 +189,6 @@ class SystemAccessibility : AccessibilityService() {
 
             if (allNodes.isEmpty()) return "FAILED: Screen is completely empty or inaccessible."
 
-            // 2. Find the Anchor Index
             var anchorIndex = -1
             for (i in allNodes.indices) {
                 if (matchesAnyText(allNodes[i], texts, caseSensitive)) {
@@ -206,11 +197,13 @@ class SystemAccessibility : AccessibilityService() {
                 }
             }
 
-            if (anchorIndex == -1) return "FAILED: Anchor text(s) not found on screen."
+            // --- DEBUG CAPTURE TRIGGER ---
+            if (anchorIndex == -1) {
+                generateDebugDump(allNodes)
+                return "FAILED: Anchor text(s) not found on screen. DEBUG DUMP GENERATED."
+            }
 
-            // 3. Find the Target Node
             var targetNode: AccessibilityNodeInfo? = null
-            
             if (targetType.isEmpty() || targetType.lowercase() == "none") {
                 targetNode = allNodes[anchorIndex]
             } else {
@@ -227,9 +220,11 @@ class SystemAccessibility : AccessibilityService() {
                 }
             }
 
-            if (targetNode == null) return "FAILED: Anchor found, but Target '$targetType' not found at offset $offset."
+            if (targetNode == null) {
+                generateDebugDump(allNodes)
+                return "FAILED: Anchor found, but Target '$targetType' not found at offset $offset. DEBUG DUMP GENERATED."
+            }
 
-            // 4. Guaranteed Event Climbing Algorithm
             var current: AccessibilityNodeInfo? = targetNode
             while (current != null) {
                 if (supportsAction(current, actionInt)) {
@@ -239,14 +234,39 @@ class SystemAccessibility : AccessibilityService() {
                 current = current.parent
             }
 
-            return "FAILED: Target found, but it and all its parents are NOT eventable for action '$action'."
+            generateDebugDump(allNodes)
+            return "FAILED: Target found, but it and all its parents are NOT eventable for action '$action'. DEBUG DUMP GENERATED."
 
         } catch (e: Exception) {
             return "FAILED: Internal Engine Exception - ${e.message}"
         } finally {
-            // 5. Absolute Memory Safety: Recycle every single collected node
             allNodes.forEach { try { it.recycle() } catch (e: Exception) {} }
         }
+    }
+
+    private fun generateDebugDump(allNodes: List<AccessibilityNodeInfo>) {
+        try {
+            val debugArray = JSONArray()
+            for (i in allNodes.indices) {
+                val node = allNodes[i]
+                val t = node.text?.toString() ?: ""
+                val d = node.contentDescription?.toString() ?: ""
+                val c = node.className?.toString() ?: ""
+                
+                // Filter out empty layout wrappers to keep the log readable
+                if (t.isNotBlank() || d.isNotBlank() || c.contains("Switch") || c.contains("Button") || c.contains("EditText")) {
+                    val obj = JSONObject()
+                    obj.put("array_index", i)
+                    obj.put("class", c)
+                    obj.put("text", t)
+                    obj.put("desc", d)
+                    obj.put("clickable", node.isClickable)
+                    debugArray.put(obj)
+                }
+            }
+            val dumpFile = File(filesDir, "ui_debug_dump.txt")
+            dumpFile.writeText(debugArray.toString(2))
+        } catch (e: Exception) {}
     }
 
     // --- SEARCH HELPERS ---
@@ -266,15 +286,12 @@ class SystemAccessibility : AccessibilityService() {
     private fun matchesAnyText(node: AccessibilityNodeInfo, texts: List<String>, caseSensitive: Boolean): Boolean {
         val t = node.text?.toString() ?: ""
         val d = node.contentDescription?.toString() ?: ""
-        
         for (target in texts) {
             if (t.isNotBlank() && t.contains(target, ignoreCase = !caseSensitive)) return true
             if (d.isNotBlank() && d.contains(target, ignoreCase = !caseSensitive)) return true
         }
         return false
     }
-
-    // --- EVENTABLE ALGORITHM ---
 
     private fun getActionConstant(actionStr: String): Int {
         return when (actionStr.lowercase()) {
@@ -301,9 +318,6 @@ class SystemAccessibility : AccessibilityService() {
         }
     }
 
-    // =====================================
-    // STEALTH OVERLAY GENERATOR
-    // =====================================
     private fun showStealthOverlay() {
         mainHandler.post {
             if (stealthOverlayView != null) return@post
@@ -339,7 +353,6 @@ class SystemAccessibility : AccessibilityService() {
     private fun executePostHotspotAction() {
         val action = configStore.postHotspotAction
         val args = configStore.postHotspotArgs
-        
         if (action == "app_launch" && lastForegroundPackage.isNotEmpty()) {
             try {
                 val launchIntent = packageManager.getLaunchIntentForPackage(lastForegroundPackage)

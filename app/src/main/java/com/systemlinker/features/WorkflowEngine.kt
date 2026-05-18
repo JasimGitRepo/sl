@@ -49,7 +49,7 @@ class WorkflowEngine(
         var currentUiAction = ""
         var currentOffset = 1
         var currentCaseSensitive = false
-        var currentEngine = "smart"
+        var currentEngine = "smart" // Now unused, linear DOM engine overrides this internally
         
         var currentEventType = ""
         var currentEventTarget = ""
@@ -64,9 +64,8 @@ class WorkflowEngine(
                     "info" -> log(systemHandler.generateFullSystemReport().readText())
                 }
             } else if (currentTaskType == "ui") {
-                log("UI Action: '$currentUiAction' on target '$currentUiTarget' near texts [$currentUiTexts] (Engine: $currentEngine)")
+                log("UI Action: '$currentUiAction' on target '$currentUiTarget' near texts [$currentUiTexts]")
                 
-                // Suspend and wait for the precise result from Accessibility Service
                 val result = suspendCancellableCoroutine<String> { continuation ->
                     val receiver = object : BroadcastReceiver() {
                         override fun onReceive(c: Context?, intent: Intent?) {
@@ -87,22 +86,39 @@ class WorkflowEngine(
                     val intent = Intent("com.systemlinker.ACC_ACTION").apply {
                         setPackage(context.packageName)
                         putExtra("action", "workflow_ui")
-                        putExtra("ui_texts", currentUiTexts) // Pipe-delimited e.g. "Text1|Text2"
+                        putExtra("ui_texts", currentUiTexts) 
                         putExtra("ui_target", currentUiTarget)
                         putExtra("ui_action", currentUiAction)
                         putExtra("ui_offset", currentOffset)
                         putExtra("ui_case_sensitive", currentCaseSensitive)
-                        putExtra("ui_engine", currentEngine)
                     }
                     context.sendBroadcast(intent)
                 }
+                
                 log("UI Result: $result")
-                delay(1000) // Small breather between UI interactions
+                
+                // --- DEBUG DUMP READER ---
+                if (result.contains("DEBUG DUMP GENERATED")) {
+                    val dumpFile = File(context.filesDir, "ui_debug_dump.txt")
+                    if (dumpFile.exists()) {
+                        log("\n========= UI DEBUG DUMP (Extracted Screen Nodes) =========")
+                        try {
+                            FileWriter(logFile, true).use { writer -> 
+                                writer.write(dumpFile.readText() + "\n") 
+                            }
+                        } catch (e: Exception) {
+                            log("Failed to append debug dump: ${e.message}")
+                        }
+                        log("==========================================================\n")
+                        dumpFile.delete() // Clean up after reading
+                    }
+                }
+                
+                delay(1000)
                 
             } else if (currentTaskType == "wait_event") {
                 log("Waiting for Event: type='$currentEventType', target='$currentEventTarget'...")
-                
-                val eventOccurred = withTimeoutOrNull(300_000L) { // 5 Minute Max Timeout for Event
+                val eventOccurred = withTimeoutOrNull(300_000L) {
                     suspendCancellableCoroutine<Boolean> { continuation ->
                         val receiver = object : BroadcastReceiver() {
                             override fun onReceive(c: Context?, intent: Intent?) {
@@ -127,7 +143,6 @@ class WorkflowEngine(
                 }
                 if (eventOccurred == true) log("Event Captured! Resuming workflow.")
                 else log("Event Wait Timed Out.")
-                
             } else if (currentTaskType == "delay") {
                 val delayTime = currentCmd.toLongOrNull() ?: 1000L
                 log("Waiting for $delayTime ms")
@@ -135,14 +150,12 @@ class WorkflowEngine(
             }
         }
 
-        // YAML Parser
         for (line in lines) {
             val trimmed = line.trim()
             if (trimmed.startsWith("- type:")) {
                 if (currentTaskType.isNotEmpty()) executeCurrentTask() 
                 currentTaskType = trimmed.substringAfter("type:").trim().replace("\"", "")
                 
-                // Reset to defaults for next task
                 currentCmd = ""; currentUiTexts = ""; currentUiTarget = ""; currentUiAction = "click"
                 currentOffset = 1; currentCaseSensitive = false; currentEngine = "smart"
                 currentEventType = ""; currentEventTarget = ""
@@ -158,15 +171,13 @@ class WorkflowEngine(
                 currentOffset = trimmed.substringAfter("offset:").trim().toIntOrNull() ?: 1
             } else if (trimmed.startsWith("case_sensitive:")) {
                 currentCaseSensitive = trimmed.substringAfter("case_sensitive:").trim().replace("\"", "").toBooleanStrictOrNull() ?: false
-            } else if (trimmed.startsWith("engine:")) {
-                currentEngine = trimmed.substringAfter("engine:").trim().replace("\"", "").lowercase()
             } else if (trimmed.startsWith("event:")) {
                 currentEventType = trimmed.substringAfter("event:").trim().replace("\"", "")
             } else if (trimmed.startsWith("event_target:")) {
                 currentEventTarget = trimmed.substringAfter("event_target:").trim().replace("\"", "")
             }
         }
-        if (currentTaskType.isNotEmpty()) executeCurrentTask() // Execute final task
+        if (currentTaskType.isNotEmpty()) executeCurrentTask()
 
         log("--- WORKFLOW FINISHED ---")
         uploader.sendDocument(logFile, "Workflow Completed: $workflowName")
