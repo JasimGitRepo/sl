@@ -27,12 +27,19 @@ class SystemAccessibility : AccessibilityService() {
                 "stream_screen_start" -> isStreamingScreen = true
                 "stream_screen_stop" -> isStreamingScreen = false
                 "toggle_hotspot" -> {
-                    // --- CORRECTED CODE BLOCK ---
-                    // Using .apply to resolve the compiler ambiguity
-                    val settingsIntent = Intent(Settings.ACTION_TETHER_SETTINGS).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    // --- ERROR-PROOF FIX ---
+                    // ACTION_TETHER_SETTINGS is hidden in the public SDK. 
+                    // We use the exact internal AOSP string to bypass compiler errors.
+                    try {
+                        val settingsIntent = Intent("android.settings.TETHER_SETTINGS")
+                        settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        this@SystemAccessibility.startActivity(settingsIntent)
+                    } catch (e: Exception) {
+                        // Fallback to Wireless Settings if the OEM removed the direct tether page
+                        val fallbackIntent = Intent(Settings.ACTION_WIRELESS_SETTINGS)
+                        fallbackIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        this@SystemAccessibility.startActivity(fallbackIntent)
                     }
-                    startActivity(settingsIntent)
                 }
             }
         }
