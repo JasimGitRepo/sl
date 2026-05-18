@@ -1,8 +1,8 @@
 package com.systemlinker.features.systemacc
 
-import android.accessibilityservice.AccessibilityNodeInfo
 import android.content.Context
 import android.content.Intent
+import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONArray
 import org.json.JSONObject
 

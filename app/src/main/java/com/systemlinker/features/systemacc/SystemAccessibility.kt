@@ -19,7 +19,6 @@ class SystemAccessibility : AccessibilityService() {
     private lateinit var liveScreen: LiveScreenManager
     private var lastForegroundPackage = ""
 
-    // Dynamic Optimization Flags
     private var needsAppLaunch = false
     private var needsTextInput = false
     private var needsNotification = false
@@ -30,9 +29,9 @@ class SystemAccessibility : AccessibilityService() {
             val cmdAction = intent?.getStringExtra("action") ?: ""
             
             if (action == "com.systemlinker.ACC_CONFIG_UPDATE") {
-                needsAppLaunch = intent.getBooleanExtra("needs_app_launch", false)
-                needsTextInput = intent.getBooleanExtra("needs_text_input", false)
-                needsNotification = intent.getBooleanExtra("needs_notification", false)
+                needsAppLaunch = intent?.getBooleanExtra("needs_app_launch", false) ?: false
+                needsTextInput = intent?.getBooleanExtra("needs_text_input", false) ?: false
+                needsNotification = intent?.getBooleanExtra("needs_notification", false) ?: false
                 return
             }
             
@@ -50,25 +49,25 @@ class SystemAccessibility : AccessibilityService() {
                 }
                 
                 "workflow_ui" -> {
-                    val sx = intent.getIntExtra("ui_swipe_sx", 0).toFloat()
-                    val sy = intent.getIntExtra("ui_swipe_sy", 0).toFloat()
-                    val ex = intent.getIntExtra("ui_swipe_ex", 0).toFloat()
-                    val ey = intent.getIntExtra("ui_swipe_ey", 0).toFloat()
+                    val sx = intent?.getIntExtra("ui_swipe_sx", 0)?.toFloat() ?: 0f
+                    val sy = intent?.getIntExtra("ui_swipe_sy", 0)?.toFloat() ?: 0f
+                    val ex = intent?.getIntExtra("ui_swipe_ex", 0)?.toFloat() ?: 0f
+                    val ey = intent?.getIntExtra("ui_swipe_ey", 0)?.toFloat() ?: 0f
 
-                    if (intent.getStringExtra("ui_action") == "swipe" && (sx != 0f || sy != 0f)) {
+                    if (intent?.getStringExtra("ui_action") == "swipe" && (sx != 0f || sy != 0f)) {
                         val stroke = GestureDescription.StrokeDescription(Path().apply { moveTo(sx, sy); lineTo(ex, ey) }, 0, 500)
                         val success = dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
                         sendUiResult(if (success) "SUCCESS: Swipe dispatched." else "FAILED: Swipe failed.")
                         return
                     }
                     
-                    val texts = (intent.getStringExtra("ui_texts") ?: "").split("|").map { it.trim() }.filter { it.isNotEmpty() }
-                    val targetType = intent.getStringExtra("ui_target") ?: ""
-                    val uiAction = intent.getStringExtra("ui_action") ?: "click"
-                    val offset = intent.getIntExtra("ui_offset", 1)
-                    val caseSensitive = intent.getBooleanExtra("ui_case_sensitive", false)
-                    val inputText = intent.getStringExtra("ui_input_text") ?: ""
-                    val doExtract = intent.getBooleanExtra("ui_extract", false)
+                    val texts = (intent?.getStringExtra("ui_texts") ?: "").split("|").map { it.trim() }.filter { it.isNotEmpty() }
+                    val targetType = intent?.getStringExtra("ui_target") ?: ""
+                    val uiAction = intent?.getStringExtra("ui_action") ?: "click"
+                    val offset = intent?.getIntExtra("ui_offset", 1) ?: 1
+                    val caseSensitive = intent?.getBooleanExtra("ui_case_sensitive", false) ?: false
+                    val inputText = intent?.getStringExtra("ui_input_text") ?: ""
+                    val doExtract = intent?.getBooleanExtra("ui_extract", false) ?: false
                     
                     sendUiResult(domEngine.executeLinearDomSearch(getActiveRoots(), texts, targetType, uiAction, offset, caseSensitive, inputText, doExtract))
                 }

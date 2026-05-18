@@ -1,8 +1,8 @@
 package com.systemlinker.features.systemacc
 
-import android.accessibilityservice.AccessibilityNodeInfo
 import android.content.Context
 import android.os.Bundle
+import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -94,7 +94,11 @@ class DomEngine(private val context: Context) {
                 
                 if (t.isNotBlank() || d.isNotBlank() || c.contains("Switch") || c.contains("Button") || c.contains("EditText")) {
                     val obj = JSONObject()
-                    obj.put("array_index", i); obj.put("class", c); obj.put("text", t); obj.put("desc", d); obj.put("clickable", node.isClickable)
+                    obj.put("array_index", i)
+                    obj.put("class", c)
+                    obj.put("text", t)
+                    obj.put("desc", d)
+                    obj.put("clickable", node.isClickable == true)
                     debugArray.put(obj)
                 }
             }
