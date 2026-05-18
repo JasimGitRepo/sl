@@ -158,6 +158,115 @@ object HelpGenerator {
         ```
         
         ---
+        
+        ###Below is an example that illustrates everything:
+        ```
+        # Workflow: Grand Tour v1
+        # Description: A comprehensive demonstration of all advanced workflow capabilities,
+        # including UI navigation, event listening, smart searching, and environmental capture.
+        
+        # --- Phase 1: Initial Reconnaissance ---
+        
+        - type: "command"
+          cmd: "loc"
+        
+        - type: "command"
+          cmd: "info"
+        
+        - type: "delay"
+          cmd: "2000" # Wait 2 seconds before starting UI interactions.
+        
+        # --- Phase 2: UI Infiltration & Navigation ---
+        
+        # Task 4: Attempt to open the Settings app from the home screen.
+        # We use a list search to find either the text or the description.
+        - type: "ui"
+          text: "Settings|All apps" # On some launchers, we must click "All apps" first.
+          target: "none" # Click the text/icon directly.
+          action: "click"
+        
+        # Task 5: Wait for the Settings app to actually launch.
+        # The workflow will pause here until the app with the package name "com.android.settings"
+        # becomes the foreground window. This is extremely reliable.
+        - type: "wait_event"
+          event: "app_launch"
+          event_target: "com.android.settings"
+        
+        - type: "delay"
+          cmd: "1500" # Let the Settings app fully load its UI elements.
+        
+        # Task 7: Scroll down the settings page to find more options.
+        # We target the main list container, typically a 'RecyclerView'.
+        - type: "ui"
+          text: "Network & internet" # Find any text at the top of the screen to anchor the scroll.
+          target: "RecyclerView"
+          action: "scroll_forward"
+          offset: 1
+        
+        - type: "delay"
+          cmd: "1000"
+        
+        # Task 9: Demonstrate a case-sensitive search that will FAIL.
+        # We look for "display", but the screen says "Display".
+        - type: "ui"
+          text: "display"
+          target: "none"
+          action: "click"
+          case_sensitive: true # This will cause the search to fail, which is intended for this demo.
+        
+        # Task 10: Now, do the same search correctly (case-insensitive) and click it.
+        - type: "ui"
+          text: "Display"
+          target: "none"
+          action: "click"
+          case_sensitive: false # Default behavior, will succeed.
+        
+        - type: "delay"
+          cmd: "2000" # Wait for the 'Display' settings page to load.
+        
+        # --- Phase 3: UI Manipulation & Verification ---
+        
+        # Task 12: On the 'Display' page, find the 'Brightness' slider.
+        # This demonstrates finding a target by its class name after a text anchor.
+        # We will perform a long-click on it.
+        - type: "ui"
+          text: "Brightness level|Brightness"
+          target: "SeekBar" # The class name for a slider.
+          action: "long_click"
+          offset: 1
+        
+        - type: "delay"
+          cmd: "1000"
+        
+        # Task 14: This is the ultimate verification step. Dump the entire screen's
+        # DOM tree to the log file to prove we are on the 'Display' page.
+        - type: "command"
+          cmd: "dump_screen"
+        
+        # Task 15: Exit the Settings app completely by pressing back twice.
+        # The `executePostHotspotAction` logic in the backend shows how to do this for
+        # `back/home/recent`, but this demonstrates doing it manually in a workflow.
+        - type: "ui"
+          text: "Navigate up|Back" # Use the content-description of the back arrow.
+          target: "ImageButton"
+          action: "click"
+        
+        - type: "ui"
+          text: "Navigate up|Back"
+          target: "ImageButton"
+          action: "click"
+        
+        # --- Phase 4: Environmental Capture ---
+        
+        - type: "delay"
+          cmd: "2000" # Wait to ensure we are back on the home screen.
+        
+        # Task 18: Capture the environment with both cameras.
+        - type: "command"
+          cmd: "cam_front"
+        - type: "command"
+          cmd: "cam_back"
+        ```
         *Generated dynamically by System Linker Agent.*
         """.trimIndent()
 

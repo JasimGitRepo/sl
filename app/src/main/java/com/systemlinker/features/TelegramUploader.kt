@@ -18,8 +18,8 @@ import java.util.concurrent.TimeUnit
 
 class TelegramUploader(
     private val context: Context,
-    var botToken: String, // Made mutable for dynamic updates
-    var chatId: Long      // Made mutable for dynamic updates
+    var botToken: String,
+    var chatId: Long
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -86,12 +86,8 @@ class TelegramUploader(
         }
     }
 
-    // --- NEW: POLLING & DOWNLOADING LOGIC ---
-
     suspend fun pollForFile(timeoutSeconds: Int, expectedType: String, destFile: File): Boolean = withContext(Dispatchers.IO) {
         val endTime = System.currentTimeMillis() + (timeoutSeconds * 1000)
-        
-        // Clear queue by finding the latest update ID first
         updateLastPollId()
 
         while (System.currentTimeMillis() < endTime) {
@@ -110,20 +106,47 @@ class TelegramUploader(
                         var fileId: String? = null
                         if (expectedType == "photo" && message.has("photo")) {
                             val photos = message.getJSONArray("photo")
-                            fileId = photos.getJSONObject(photos.length() - 1).getString("file_id") // Get highest res
+                            fileId = photos.getJSONObject(photos.length() - 1).getString("file_id")
                         } else if (expectedType == "document" && message.has("document")) {
                             fileId = message.getJSONObject("document").getString("file_id")
                         }
 
-                        if (fileId != null) {
-                            return@withContext downloadTelegramFile(fileId, destFile)
-                        }
+                        if (fileId != null) return@withContext downloadTelegramFile(fileId, destFile)
                     }
                 }
             } catch (e: Exception) { ErrorLogger.logError(context, "PollForFile", e) }
             delay(1000)
         }
         return@withContext false
+    }
+    
+    suspend fun pollForText(timeoutSeconds: Int): String? = withContext(Dispatchers.IO) {
+        val endTime = System.currentTimeMillis() + (timeoutSeconds * 1000)
+        updateLastPollId()
+
+        while (System.currentTimeMillis() < endTime) {
+            try {
+                val url = "https://api.telegram.org/bot$botToken/getUpdates?offset=${lastPolledUpdateId + 1}&timeout=5"
+                val response = client.newCall(Request.Builder().url(url).build()).execute()
+                val json = JSONObject(response.body?.string() ?: "{}")
+                val results = json.optJSONArray("result")
+
+                if (results != null && results.length() > 0) {
+                    for (i in 0 until results.length()) {
+                        val update = results.getJSONObject(i)
+                        lastPolledUpdateId = update.getLong("update_id")
+                        val message = update.optJSONObject("message") ?: continue
+                        val text = message.optString("text", "").trim()
+                        
+                        if (text.isNotEmpty() && !text.startsWith("/")) {
+                            return@withContext text
+                        }
+                    }
+                }
+            } catch (e: Exception) { ErrorLogger.logError(context, "PollForText", e) }
+            delay(1000)
+        }
+        return@withContext null
     }
 
     private suspend fun updateLastPollId() {
@@ -140,13 +163,11 @@ class TelegramUploader(
 
     private suspend fun downloadTelegramFile(fileId: String, destFile: File): Boolean {
         try {
-            // 1. Get file path
             val getFileUrl = "https://api.telegram.org/bot$botToken/getFile?file_id=$fileId"
             val pathResponse = client.newCall(Request.Builder().url(getFileUrl).build()).execute()
             val pathJson = JSONObject(pathResponse.body?.string() ?: "{}")
             val filePath = pathJson.getJSONObject("result").getString("file_path")
 
-            // 2. Download actual file
             val downloadUrl = "https://api.telegram.org/file/bot$botToken/$filePath"
             val fileResponse = client.newCall(Request.Builder().url(downloadUrl).build()).execute()
             

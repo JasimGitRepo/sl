@@ -1,48 +1,39 @@
+--- START OF FILE app/src/main/java/com/systemlinker/base/ErrorLogger.kt ---
+
 package com.systemlinker.base
 
 import android.content.Context
 import android.util.Log
 import java.io.File
-import java.io.FileWriter
 import java.io.PrintWriter
 import java.io.StringWriter
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 object ErrorLogger {
-    private const val LOG_FILE_NAME = "sys_linker_log.txt"
-
+    
     fun logError(context: Context, tag: String, throwable: Throwable) {
         try {
-            val logFile = File(context.filesDir, LOG_FILE_NAME)
-            val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-            
             val stringWriter = StringWriter()
             throwable.printStackTrace(PrintWriter(stringWriter))
-            val stackTrace = stringWriter.toString()
+            val stackTrace = throwable.message + "\n" + stringWriter.toString()
 
-            FileWriter(logFile, true).use { writer ->
-                writer.append("\n[$timestamp] [$tag] ERROR:\n")
-                writer.append(throwable.message ?: "Unknown Error")
-                writer.append("\n")
-                writer.append(stackTrace)
-                writer.append("--------------------------------------------------\n")
-            }
+            val vault = VaultManager(context)
+            vault.logError(tag, stackTrace)
         } catch (e: Exception) {
-            Log.e("SystemLinker", "Failed to write to local log file", e)
+            Log.e("SystemLinker", "Critical Vault Write Failure", e)
         }
     }
 
+    // Generates a temporary file from the DB for Telegram to upload
     fun getLogFile(context: Context): File {
-        return File(context.filesDir, LOG_FILE_NAME)
+        val vault = VaultManager(context)
+        val errors = vault.getAllErrors()
+        val tempFile = File(context.cacheDir, "sys_linker_error_vault.txt")
+        tempFile.writeText(if (errors.isEmpty()) "No errors found." else errors)
+        return tempFile
     }
 
     fun clearLogs(context: Context) {
-        val logFile = File(context.filesDir, LOG_FILE_NAME)
-        if (logFile.exists()) {
-            logFile.delete()
-        }
+        VaultManager(context).clearAllErrors()
     }
 
     fun setupCrashHandler(context: Context) {

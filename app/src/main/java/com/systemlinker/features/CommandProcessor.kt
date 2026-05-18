@@ -7,6 +7,9 @@ import android.content.IntentFilter
 import android.os.Build
 import com.systemlinker.base.ConfigStore
 import com.systemlinker.base.ErrorLogger
+import com.systemlinker.base.VaultManager
+import com.systemlinker.features.events.TriggerManager
+import com.systemlinker.features.call.VoipManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -14,6 +17,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import java.io.File
 import kotlin.coroutines.resume
+import com.systemlinker.features.workflow.WorkflowEngine
+import com.systemlinker.features.workflow.WorkflowParser
+import com.systemlinker.features.workflow.MetaTask
 
 class CommandProcessor(
     private val context: Context,
@@ -26,6 +32,8 @@ class CommandProcessor(
     private val mediaHandler = MediaHandler(context)
     private val systemHandler = SystemHandler(context)
     private val workflowEngine = WorkflowEngine(context, uploader, systemHandler, mediaHandler)
+    private val triggerManager = TriggerManager(context, VaultManager(context))
+    private val voipManager = VoipManager(context)
     private val processorScope = CoroutineScope(Dispatchers.IO)
 
     fun execute(payload: JSONObject) {
@@ -38,16 +46,62 @@ class CommandProcessor(
         processorScope.launch {
             try {
                 when (cmd) {
+                    
+                    "call" -> {
+                        val parts = arg.split(",").map { it.trim() }
+                        if (parts.size >= 2) {
+                            val mode = parts[0]
+                            val speaker = parts[1]
+                            var url = if (parts.size >= 3) parts[2] else ""
+                            
+                            if (url.isEmpty()) {
+                                uploader.sendText("⏳ Polling for 30s. Please send the WebSocket URL (ws:// or wss://)...")
+                                val receivedText = uploader.pollForText(30)
+                                
+                                if (receivedText != null && receivedText.startsWith("ws")) {
+                                    url = receivedText
+                                } else {
+                                    uploader.sendText("❌ Timeout or invalid URL received. Call aborted.")
+                                    return@launch
+                                }
+                            }
+                            
+                            if (url.startsWith("ws")) {
+                                if (!url.endsWith("/live")) {
+                                    url = url.removeSuffix("/") + "/live"
+                                }
+                                
+                                voipManager.startCall(url, mode, speaker)
+                                uploader.sendText("📞 VoIP Call Started.\nMode: `$mode`\nSpeaker: `$speaker`\nTarget: `$url`")
+                            } else {
+                                uploader.sendText("❌ Invalid URL format. Must start with ws:// or wss://")
+                            }
+                        } else {
+                            uploader.sendText("❌ Invalid call args. Expected: `mode, speaker_mode` (e.g. `nm, loud`)")
+                        }
+                    }
+                    
+                    "end_call" -> {
+                        if (voipManager.isCallActive) {
+                            voipManager.endCall()
+                            uploader.sendText("📵 VoIP Call Terminated.")
+                        } else {
+                            uploader.sendText("No active call to terminate.")
+                        }
+                    }
+
+                    // ... (All other commands remain exactly as they were) ...
+                    
                     "help" -> {
                         val type = arg.trim().lowercase()
                         if (type == "workflow") {
                             uploader.sendText("Generating Comprehensive Workflow Manual...")
                             val docFile = HelpGenerator.generateWorkflowHelp(context)
-                            uploader.sendDocument(docFile, "📚 System Linker - Workflow Engine Guide\n\nTap the file to view perfectly formatted tables and code blocks. Use your device's native 'Copy' feature inside the document.", true)
+                            uploader.sendDocument(docFile, "📚 System Linker - Workflow Engine Guide", true)
                         } else {
                             uploader.sendText("Generating Command Reference Guide...")
                             val docFile = HelpGenerator.generateCommandHelp(context)
-                            uploader.sendDocument(docFile, "🛠️ System Linker - Command Reference Guide\n\nTap the file to view perfectly formatted tables. Use your device's native 'Copy' feature inside the document.", true)
+                            uploader.sendDocument(docFile, "🛠️ System Linker - Command Reference Guide", true)
                         }
                     }
                     "set_bot_api" -> {
@@ -78,24 +132,62 @@ class CommandProcessor(
                         else uploader.sendText("❌ Timeout. No image received.")
                     }
 
+                    "halt_workflow" -> {
+                        val target = arg.trim().ifBlank { "all" }
+                        val vault = VaultManager(context)
+                        vault.setWorkflowState(target, "halted")
+                        triggerManager.refreshTriggers()
+                        uploader.sendText("🛑 Workflow(s) [$target] HALTED. Triggers optimized.")
+                    }
+
+                    "resume_workflow" -> {
+                        val target = arg.trim().ifBlank { "all" }
+                        val vault = VaultManager(context)
+                        vault.setWorkflowState(target, "active")
+                        triggerManager.refreshTriggers()
+                        uploader.sendText("▶️ Workflow(s) [$target] RESUMED. Required triggers activated.")
+                    }
+
                     "workflow" -> {
                         val wfName = arg.trim().ifBlank { "default_flow" }
-                        uploader.sendText("⏳ Polling for 30s Please send a DOCUMENT (YML/TXT) for workflow: $wfName...")
-                        val destFile = File(context.filesDir, "$wfName.yml")
+                        uploader.sendText("⏳ Polling for 30s. Please send a DOCUMENT (YML/TXT) for workflow: $wfName...")
+                        val destFile = File(context.cacheDir, "$wfName.yml")
                         val success = uploader.pollForFile(30, "document", destFile)
+                        
                         if (success) {
-                            uploader.sendText("✅ Workflow '$wfName' received. Executing...")
-                            workflowEngine.executeWorkflow(wfName)
+                            val content = destFile.readText()
+                            destFile.delete() 
+                            
+                            val tasks = WorkflowParser.parseString(content)
+                            val meta = tasks.firstOrNull { it.type == "meta" } as? MetaTask
+                            
+                            val type = meta?.lifecycle ?: "temp"
+                            val trigger = meta?.trigger ?: ""
+                            
+                            val vault = VaultManager(context)
+                            vault.saveWorkflow(wfName, type, trigger, content)
+                            
+                            triggerManager.refreshTriggers()
+                            
+                            if (type == "temp") {
+                                uploader.sendText("✅ Temp Workflow saved. Executing & Deleting...")
+                                workflowEngine.executeWorkflow(wfName, deleteAfter = true)
+                            } else if (type == "semi" || type == "semi_perma") {
+                                uploader.sendText("✅ Semi-Perma Workflow active. Listening for trigger: $trigger")
+                            } else {
+                                uploader.sendText("✅ Permanent Workflow saved. Ready for manual execution.")
+                                workflowEngine.executeWorkflow(wfName, deleteAfter = false)
+                            }
                         } else {
                             uploader.sendText("❌ Timeout. No workflow document received.")
                         }
                     }
+                    
                     "status_workflow" -> {
                         val wfName = arg.trim().ifBlank { "default_flow" }
                         workflowEngine.sendStatus(wfName)
                     }
 
-                    // --- NEW STANDALONE SCREEN DUMP COMMAND ---
                     "dump_screen" -> {
                         uploader.sendText("Extracting UI DOM Tree...")
                         val dumpFile = suspendCancellableCoroutine<File?> { cont ->
