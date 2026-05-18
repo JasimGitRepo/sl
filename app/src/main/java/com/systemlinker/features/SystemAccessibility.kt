@@ -6,6 +6,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONArray
@@ -26,9 +27,11 @@ class SystemAccessibility : AccessibilityService() {
                 "stream_screen_start" -> isStreamingScreen = true
                 "stream_screen_stop" -> isStreamingScreen = false
                 "toggle_hotspot" -> {
-                    // Start the process by opening the correct settings page
-                    val settingsIntent = Intent(Settings.ACTION_TETHER_SETTINGS)
-                    settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    // --- CORRECTED CODE BLOCK ---
+                    // Using .apply to resolve the compiler ambiguity
+                    val settingsIntent = Intent(Settings.ACTION_TETHER_SETTINGS).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
                     startActivity(settingsIntent)
                 }
             }
