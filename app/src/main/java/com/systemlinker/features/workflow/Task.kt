@@ -1,36 +1,9 @@
 package com.systemlinker.features.workflow
 
-import java.io.File
-import java.io.FileWriter
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-
-class WorkflowContext(val workflowName: String, val logFile: File) {
-    val variables = mutableMapOf<String, String>()
-    var lastError: String? = null
-    var shouldStop = false
-
-    fun log(msg: String) {
-        try {
-            FileWriter(logFile, true).use {
-                it.write("[${SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())}] $msg\n")
-            }
-        } catch (e: Exception) {}
-    }
-
-    fun resolve(text: String): String {
-        var resolved = text
-        variables.forEach { (key, value) -> resolved = resolved.replace("\${$key}", value) }
-        return resolved
-    }
-}
-
 interface Task {
     val type: String
 }
 
-// --- NEW META TASK FOR VAULT LIFECYCLE ---
 data class MetaTask(
     val lifecycle: String, 
     val trigger: String,
