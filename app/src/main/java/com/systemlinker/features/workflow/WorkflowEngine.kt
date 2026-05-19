@@ -38,48 +38,56 @@ class WorkflowEngine(
         }
 
         vault.clearLogs(workflowName)
-        val dummyFile = File(context.cacheDir, "dummy.txt")
-        val wfContext = WorkflowContext(workflowName, dummyFile)
         
         fun logToVault(msg: String) {
-            val formatted = "[${SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())}] $msg"
+            val formatted = "[${SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())}] $msg"
             vault.appendLog(workflowName, formatted)
         }
 
-        logToVault("--- WORKFLOW LOG STARTED ---")
-        logToVault("Parsing workflow from Vault: $workflowName")
-        
+        val wfContext = WorkflowContext(workflowName, ::logToVault)
         val tasks = WorkflowParser.parseString(content) 
+        
+        val metaTask = tasks.firstOrNull { it.type == "meta" } as? MetaTask
+        val abortOnError = metaTask?.abortOnError ?: true
+        val taskDelayMs = metaTask?.taskDelayMs ?: 1000L
+
+        logToVault("==================================================")
+        logToVault(" WORKFLOW ENGINE INITIALIZED: $workflowName ")
+        logToVault(" EXECUTION MODE: ${if (abortOnError) "STRICT (Abort on Err)" else "LENIENT (Skip on Err)"}")
+        logToVault(" GLOBAL TASK DELAY: ${taskDelayMs}ms")
+        logToVault("==================================================")
+        
         var ip = 0 
         val loopStack = mutableListOf<Pair<Int, Int>>()
         var inCatchBlock = false
 
         while (ip < tasks.size && !wfContext.shouldStop) {
             val task = tasks[ip]
+            
+            // Increment logic for real tasks (ignore meta/endings in count visually)
+            if (task.type != "meta") wfContext.stepCount++
+            val stepPrefix = String.format("[STEP %03d]", wfContext.stepCount)
+            
+            if (task.type != "meta") {
+                logToVault("$stepPrefix -> Preparing [${task.type.uppercase()}]")
+            }
+
             var success = true
+            val execStart = System.currentTimeMillis()
 
             try {
                 success = when (task) {
                     is DelayTask -> { 
-                        logToVault("Delay: ${task.durationMs}ms")
                         delay(task.durationMs)
                         true 
                     }
-                    is CmdTask -> { 
-                        logToVault("Cmd: ${task.cmd}")
-                        sysModule.execute(task, wfContext) 
-                    }
-                    is UiTask -> { 
-                        logToVault("UI: ${task.action} -> ${task.target}")
-                        uiModule.execute(task, wfContext) 
-                    }
+                    is CmdTask -> sysModule.execute(task, wfContext) 
+                    is UiTask -> uiModule.execute(task, wfContext) 
                     is VarTask -> { 
                         wfContext.variables[task.varName] = wfContext.resolve(task.varValue)
-                        logToVault("Var Set: ${task.varName} = ${wfContext.variables[task.varName]}")
                         true 
                     }
                     is WaitEventTask -> {
-                        logToVault("Waiting for Event: type='${task.eventType}', target='${task.eventTarget}'...")
                         val eventOccurred = withTimeoutOrNull(task.timeoutMs) {
                             suspendCancellableCoroutine<Boolean> { continuation ->
                                 val receiver = object : BroadcastReceiver() {
@@ -121,8 +129,7 @@ class WorkflowEngine(
                                 }
                             }
                         }
-                        if (eventOccurred == true) logToVault("Event Captured! Resuming workflow.")
-                        else logToVault("Event Wait Timed Out.")
+                        if (eventOccurred != true) throw Exception("WaitEvent Timed Out.")
                         true
                     }
                     is IfTask -> {
@@ -171,14 +178,15 @@ class WorkflowEngine(
                         true
                     }
                     is EndTryTask -> true
+                    is MetaTask -> true
                     else -> false
                 }
 
-                if (!success) throw Exception("Task Failed: ${task.type}")
+                if (!success) throw Exception("Task Returned Failure State")
 
             } catch (e: Exception) {
-                logToVault("ERROR at Task $ip: ${e.message}")
                 wfContext.lastError = e.message
+                logToVault("$stepPrefix [EXCEPTION] ${e.message}")
                 
                 var foundCatch = false
                 var depth = 0
@@ -189,17 +197,37 @@ class WorkflowEngine(
                         ip = i 
                         inCatchBlock = true
                         foundCatch = true
+                        logToVault("$stepPrefix [RECOVERY] Catch block found, diverting execution.")
                         break
                     }
                 }
-                if (!foundCatch) wfContext.shouldStop = true
+                
+                if (!foundCatch) {
+                    if (abortOnError) {
+                        logToVault(">>> CRITICAL FAILURE: Aborting workflow because abort_on_error is TRUE <<<")
+                        wfContext.dumpVariables()
+                        wfContext.shouldStop = true
+                    } else {
+                        logToVault(">>> WARNING: Task failed, but abort_on_error is FALSE. Skipping to next task. <<<")
+                    }
+                }
+            }
+            
+            val execEnd = System.currentTimeMillis()
+            if (task.type != "meta") {
+                val status = if (wfContext.shouldStop && !success) "FATAL" else if (!success) "SKIPPED" else "SUCCESS"
+                logToVault("$stepPrefix [$status] Execution took ${execEnd - execStart}ms")
             }
             
             ip++
-            delay(100)
+            if (!wfContext.shouldStop && ip < tasks.size && taskDelayMs > 0 && task.type != "meta") {
+                delay(taskDelayMs)
+            }
         }
 
-        logToVault("--- WORKFLOW FINISHED ---")
+        logToVault("==================================================")
+        logToVault(" WORKFLOW EXECUTION CONCLUDED ")
+        logToVault("==================================================")
         sendStatus(workflowName)
 
         if (deleteAfter) {

@@ -92,7 +92,11 @@ class DomEngine(private val context: Context) {
                 val d = node.contentDescription?.toString() ?: ""
                 val c = node.className?.toString() ?: ""
                 
-                if (t.isNotBlank() || d.isNotBlank() || c.contains("Switch") || c.contains("Button") || c.contains("EditText")) {
+                // Extremely comprehensive filter to grab Layouts, Lists, and Views 
+                val isInteractive = c.contains("Switch") || c.contains("Button") || c.contains("EditText") || c.contains("Box") || c.contains("Tab")
+                val isContainer = c.contains("Layout") || c.contains("Scroll") || c.contains("List") || c.contains("Pager") || c.contains("View") || c.contains("Group")
+                
+                if (t.isNotBlank() || d.isNotBlank() || isInteractive || isContainer) {
                     val obj = JSONObject()
                     obj.put("array_index", i)
                     obj.put("class", c)

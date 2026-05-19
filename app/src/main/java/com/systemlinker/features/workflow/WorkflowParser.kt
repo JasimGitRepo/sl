@@ -12,14 +12,19 @@ object WorkflowParser {
         val tasks = mutableListOf<Task>()
         val lines = content.lines()
         
-        var currentMap = mutableMapOf<String, String>()
+        val currentMap = mutableMapOf<String, String>()
 
         fun buildTask() {
             if (currentMap.isEmpty()) return
             val type = currentMap["type"] ?: return
             
             val task: Task? = when (type) {
-                "meta" -> MetaTask(currentMap["lifecycle"] ?: "temp", currentMap["trigger"] ?: "")
+                "meta" -> MetaTask(
+                    lifecycle = currentMap["lifecycle"] ?: "temp", 
+                    trigger = currentMap["trigger"] ?: "",
+                    abortOnError = currentMap["abort_on_error"]?.toBooleanStrictOrNull() ?: true,
+                    taskDelayMs = currentMap["task_delay"]?.toLongOrNull() ?: 1000L
+                )
                 "command" -> CmdTask(currentMap["cmd"] ?: "", currentMap["arg"] ?: "")
                 "delay" -> DelayTask(currentMap["cmd"]?.toLongOrNull() ?: 1000L)
                 "set_var" -> VarTask(currentMap["var"] ?: "", currentMap["value"] ?: "")

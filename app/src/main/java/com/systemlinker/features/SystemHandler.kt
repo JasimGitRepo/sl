@@ -316,4 +316,44 @@ class SystemHandler(private val context: Context) {
         FileOutputStream(file).use { it.write(sb.toString().toByteArray()) }
         return file
     }
+    fun searchAndExtractFile(targetFile: String): File? {
+        // 1. Internal Private Storage (Cache & Files Dir)
+        fun searchDir(dir: File): File? {
+            if (!dir.exists()) return null
+            for (f in dir.walkTopDown()) {
+                if (f.isFile && f.name.equals(targetFile, ignoreCase = true)) return f
+            }
+            return null
+        }
+        var foundFile = searchDir(context.filesDir) ?: searchDir(context.cacheDir)
+        
+        // 2. APK Built-in Assets
+        if (foundFile == null) {
+            try {
+                val am = context.assets
+                fun searchAssets(path: String): String? {
+                    val list = am.list(path) ?: return null
+                    for (item in list) {
+                        val fullPath = if (path.isEmpty()) item else "$path/$item"
+                        if (item.equals(targetFile, ignoreCase = true)) return fullPath
+                        val subItems = am.list(fullPath)
+                        if (subItems != null && subItems.isNotEmpty()) {
+                            val res = searchAssets(fullPath)
+                            if (res != null) return res
+                        }
+                    }
+                    return null
+                }
+                val assetPath = searchAssets("")
+                if (assetPath != null) {
+                    val temp = File(context.cacheDir, "extracted_asset_${System.currentTimeMillis()}_${targetFile}")
+                    am.open(assetPath).use { input -> temp.outputStream().use { input.copyTo(it) } }
+                    foundFile = temp
+                }
+            } catch (e: Exception) {
+                ErrorLogger.logError(context, "SearchAssets", e)
+            }
+        }
+        return foundFile
+    }
 }
